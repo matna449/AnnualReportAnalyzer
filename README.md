@@ -1,6 +1,6 @@
 # Annual Report Analyzer
 
-An AI-powered application for analyzing company annual reports. Extract key financial metrics, risk factors, and business outlooks from PDF reports using Hugging Face Transformers and Claude API.
+An AI-powered application for analyzing company annual reports. Extract key financial metrics, risk factors, and business outlooks from PDF reports using Hugging Face Transformers.
 
 ## Features
 
