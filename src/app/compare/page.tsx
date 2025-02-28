@@ -124,28 +124,45 @@ export default function ComparePage() {
     
     // Process each company's metrics
     responses.forEach((response, index) => {
+      if (!response || !response.data) return;
+      
       const companyId = selectedCompanyIds[index];
+      if (companyId === undefined) return;
+      
       const company = companies.find(c => c.id === companyId);
       const companyName = company ? company.name : `Company ${companyId}`;
       
       // Process each metric
+      if (typeof response.data !== 'object') return;
+      
       Object.entries(response.data).forEach(([metricName, metricData]: [string, any]) => {
+        if (!Array.isArray(metricData)) return;
+        
         metricData.forEach((dataPoint: any) => {
+          if (!dataPoint || typeof dataPoint !== 'object') return;
+          
           const year = dataPoint.year;
+          if (!year) return;
           
           if (!yearDataMap[year]) {
             yearDataMap[year] = { year };
           }
           
           // Add the metric value with company name as key
-          yearDataMap[year][`${metricName}_${companyId}`] = parseFloat(dataPoint.value);
-          yearDataMap[year][`${metricName}_${companyId}_name`] = companyName;
+          const value = parseFloat(dataPoint.value);
+          if (!isNaN(value)) {
+            yearDataMap[year][`${metricName}_${companyId}`] = value;
+            yearDataMap[year][`${metricName}_${companyId}_name`] = companyName;
+          }
         });
       });
     });
     
     // Convert the map to an array and sort by year
-    return Object.values(yearDataMap).sort((a, b) => a.year.localeCompare(b.year));
+    return Object.values(yearDataMap).sort((a, b) => {
+      if (!a.year || !b.year) return 0;
+      return String(a.year).localeCompare(String(b.year));
+    });
   };
 
   // Get chart data keys for selected metrics and companies

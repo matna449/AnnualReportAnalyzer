@@ -135,7 +135,7 @@ export default function Dashboard() {
 
   // Get financial metrics data for the selected company
   const getFinancialMetricsData = () => {
-    if (!companyMetrics || companyMetrics.length === 0) {
+    if (!companyMetrics || !Array.isArray(companyMetrics) || companyMetrics.length === 0) {
       return [];
     }
     
@@ -143,7 +143,11 @@ export default function Dashboard() {
     const metricsByYear: Record<string, any> = {};
     
     companyMetrics.forEach(metric => {
+      if (!metric || typeof metric !== 'object') return;
+      
       const year = metric.year;
+      if (!year) return;
+      
       if (!metricsByYear[year]) {
         metricsByYear[year] = { year };
       }
@@ -153,12 +157,17 @@ export default function Dashboard() {
       if (typeof value === 'string') {
         value = value.replace(/[$,]/g, '');
         value = parseFloat(value);
+        if (isNaN(value)) return; // Skip if not a valid number
+      } else if (typeof value !== 'number') {
+        return; // Skip if not a string or number
       }
       
       // Normalize the metric name to camelCase for the chart
+      if (!metric.name || typeof metric.name !== 'string') return;
+      
       const metricKey = metric.name
         .toLowerCase()
-        .replace(/[^a-z0-9]+(.)/g, (_, char) => char.toUpperCase());
+        .replace(/[^a-z0-9]+(.)/g, (_: string, char: string) => char.toUpperCase());
       
       metricsByYear[year][metricKey] = value;
     });
@@ -294,7 +303,7 @@ export default function Dashboard() {
                 </Tabs>
               </Box>
               
-              {companyMetrics.length > 0 ? (
+              {companyMetrics && Array.isArray(companyMetrics) && companyMetrics.length > 0 ? (
                 <FinancialPerformanceChart 
                   title="" 
                   data={getFinancialMetricsData()}

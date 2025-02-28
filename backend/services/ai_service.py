@@ -6,6 +6,8 @@ import torch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
 import re
 import json
+import requests
+from time import sleep
 
 # Load environment variables
 load_dotenv()
@@ -18,6 +20,13 @@ class AIService:
         self.model_name = os.getenv("MODEL_NAME", "google/flan-t5-large")
         self.chunk_size = int(os.getenv("CHUNK_SIZE", "4000"))
         self.overlap_size = int(os.getenv("OVERLAP_SIZE", "200"))
+        self.hf_api_url = "https://api-inference.huggingface.co/models/"
+        
+        # Check if API key is available
+        if not self.huggingface_api_key:
+            logger.warning("No Hugging Face API key provided. Using fallback methods.")
+        else:
+            logger.info(f"Hugging Face API key configured. Will use model: {self.model_name}")
         
         # Initialize Hugging Face models
         try:
@@ -42,6 +51,71 @@ class AIService:
             self.summarizer = None
             self.qa_pipeline = None
             self.text_generation = None
+    
+    def _call_huggingface_api(self, model: str, payload: Dict[str, Any], max_retries: int = 3) -> Dict[str, Any]:
+        """Make a call to the Hugging Face Inference API."""
+        if not self.huggingface_api_key:
+            raise ValueError("Hugging Face API key not configured")
+        
+        headers = {
+            "Authorization": f"Bearer {self.huggingface_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        url = f"{self.hf_api_url}{model}"
+        logger.info(f"Calling Hugging Face API: {url}")
+        logger.debug(f"Payload size: {len(str(payload))} characters")
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, headers=headers, json=payload)
+                
+                # Check if the model is still loading
+                if response.status_code == 503 and "Model is loading" in response.text:
+                    wait_time = min(2 ** attempt, 10)  # Exponential backoff
+                    logger.info(f"Model is loading. Waiting {wait_time} seconds before retry.")
+                    sleep(wait_time)
+                    continue
+                
+                # Check for service unavailability
+                if response.status_code == 503:
+                    logger.error(f"Hugging Face API service unavailable (503). Attempt {attempt+1}/{max_retries}")
+                    if attempt < max_retries - 1:
+                        wait_time = min(2 ** attempt, 10)  # Exponential backoff
+                        logger.info(f"Waiting {wait_time} seconds before retry.")
+                        sleep(wait_time)
+                        continue
+                    else:
+                        logger.error("Maximum retries reached. Falling back to local processing.")
+                        raise requests.exceptions.RequestException("Service unavailable after maximum retries")
+                
+                # Check for token limit errors
+                if response.status_code == 400:
+                    error_text = response.text
+                    logger.error(f"API request failed with 400 error: {error_text}")
+                    
+                    if "token" in error_text.lower() and "limit" in error_text.lower():
+                        # If it's a token limit issue, try to reduce the input size
+                        if "inputs" in payload and isinstance(payload["inputs"], str):
+                            # Reduce input size by half for the next attempt
+                            payload["inputs"] = payload["inputs"][:len(payload["inputs"])//2]
+                            logger.info(f"Reduced input size to {len(payload['inputs'])} characters for next attempt")
+                            continue
+                
+                # Raise exception for other errors
+                response.raise_for_status()
+                
+                # Log successful response
+                logger.info(f"Hugging Face API call successful")
+                return response.json()
+            
+            except requests.exceptions.RequestException as e:
+                logger.error(f"API request failed (attempt {attempt+1}/{max_retries}): {str(e)}")
+                if attempt == max_retries - 1:
+                    raise
+                sleep(1)  # Wait before retrying
+        
+        raise Exception("Failed to get response from Hugging Face API after multiple attempts")
     
     def summarize_text(self, text: str, max_length: int = 150, min_length: int = 50) -> str:
         """Summarize text using Hugging Face model or fallback method."""
@@ -71,19 +145,59 @@ class AIService:
         return summary[:max_length] + "..." if len(summary) > max_length else summary
     
     def extract_financial_metrics(self, text: str) -> List[Dict[str, Any]]:
-        """Extract financial metrics from text using Hugging Face or regex patterns."""
+        """Extract financial metrics from text using Hugging Face API or regex patterns."""
         try:
-            if self.text_generation:
-                prompt = f"Extract financial metrics from this text. For each metric, provide the name, value, and unit: {text[:1000]}"
+            if self.huggingface_api_key:
+                # Use a more appropriate model for financial extraction
+                financial_extraction_model = "google/flan-t5-large"
                 
-                response = self.text_generation(prompt, max_length=512, do_sample=False)[0]['generated_text']
+                # Limit text length to avoid token limit issues (T5-large has 512 token limit)
+                # Only use the first 1500 characters (roughly 300-400 tokens) for the prompt
+                limited_text = text[:1500]
                 
-                # Parse the response to extract metrics
-                metrics = self._parse_metrics_from_text(response)
-                if metrics:
-                    return metrics
+                # Use a more appropriate prompt format for T5 models
+                prompt = f"extract financial metrics: {limited_text}"
+                
+                payload = {
+                    "inputs": prompt,
+                    "parameters": {
+                        "max_length": 256,
+                        "temperature": 0.3
+                    }
+                }
+                
+                try:
+                    response = self._call_huggingface_api(financial_extraction_model, payload)
+                    
+                    if isinstance(response, list) and len(response) > 0:
+                        generated_text = response[0].get("generated_text", "")
+                        logger.info(f"Hugging Face API response: {generated_text[:100]}...")
+                        
+                        # Parse the response to extract metrics
+                        metrics = self._parse_metrics_from_text(generated_text)
+                        if metrics:
+                            logger.info(f"Successfully extracted {len(metrics)} metrics using Hugging Face API")
+                            return metrics
+                        
+                        # If no metrics found, try with a different chunk of text
+                        if len(text) > 1500:
+                            logger.info("No metrics found in first chunk, trying with next chunk")
+                            limited_text = text[1500:3000]
+                            prompt = f"extract financial metrics: {limited_text}"
+                            payload["inputs"] = prompt
+                            
+                            response = self._call_huggingface_api(financial_extraction_model, payload)
+                            if isinstance(response, list) and len(response) > 0:
+                                generated_text = response[0].get("generated_text", "")
+                                metrics = self._parse_metrics_from_text(generated_text)
+                                if metrics:
+                                    logger.info(f"Successfully extracted {len(metrics)} metrics from second chunk")
+                                    return metrics
+                except Exception as api_error:
+                    logger.error(f"Error calling Hugging Face API for metrics extraction: {str(api_error)}")
             
             # Fallback to regex pattern matching
+            logger.info("Falling back to regex pattern matching for metrics extraction")
             return self._extract_metrics_with_regex(text)
                 
         except Exception as e:
@@ -93,12 +207,15 @@ class AIService:
     def _parse_metrics_from_text(self, text: str) -> List[Dict[str, Any]]:
         """Parse metrics from generated text."""
         metrics = []
-        # Look for patterns like "Revenue: $10.5 billion"
+        
+        # Look for structured format like "Revenue: $10.5 billion"
         metric_patterns = [
             r'(Revenue|Sales|Income|Profit|Loss|EPS|EBITDA|Assets|Liabilities|Equity|Margin|Growth|ROI|ROE|ROA)[\s:]+\$?([\d\.,]+)[\s]*(million|billion|trillion|M|B|T|USD|EUR|GBP|%)?',
-            r'(Net Income|Operating Income|Gross Profit|Total Revenue)[\s:]+\$?([\d\.,]+)[\s]*(million|billion|trillion|M|B|T|USD|EUR|GBP|%)?'
+            r'(Net Income|Operating Income|Gross Profit|Total Revenue|Net Sales)[\s:]+\$?([\d\.,]+)[\s]*(million|billion|trillion|M|B|T|USD|EUR|GBP|%)?',
+            r'(Total Assets|Total Liabilities|Total Equity|Cash Flow)[\s:]+\$?([\d\.,]+)[\s]*(million|billion|trillion|M|B|T|USD|EUR|GBP|%)?'
         ]
         
+        # Try to find metrics in the text
         for pattern in metric_patterns:
             matches = re.finditer(pattern, text, re.IGNORECASE)
             for match in matches:
@@ -113,6 +230,39 @@ class AIService:
                     "category": "financial"
                 })
         
+        # If no structured metrics found, try to parse line by line
+        if not metrics:
+            lines = text.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Try to extract metric name and value from each line
+                parts = re.split(r'[:\-]', line, 1)
+                if len(parts) == 2:
+                    name = parts[0].strip()
+                    value_part = parts[1].strip()
+                    
+                    # Extract numeric value and unit
+                    value_match = re.search(r'([\d\.,]+)\s*([a-zA-Z%]+)?', value_part)
+                    if value_match:
+                        value = value_match.group(1)
+                        unit = value_match.group(2) if value_match.group(2) else ""
+                        
+                        metrics.append({
+                            "name": name,
+                            "value": value,
+                            "unit": unit,
+                            "category": "financial"
+                        })
+        
+        # Log the extracted metrics
+        if metrics:
+            logger.info(f"Parsed {len(metrics)} metrics from text: {metrics}")
+        else:
+            logger.warning(f"No metrics parsed from text: {text[:100]}...")
+            
         return metrics
     
     def _extract_metrics_with_regex(self, text: str) -> List[Dict[str, Any]]:
@@ -326,9 +476,36 @@ class AIService:
             
             # Extract financial metrics from the first few chunks (likely to contain financial data)
             metrics = []
-            for chunk in chunks[:3]:
-                chunk_metrics = self.extract_financial_metrics(chunk)
-                metrics.extend(chunk_metrics)
+            
+            # Try to extract metrics using Hugging Face API first
+            if self.huggingface_api_key:
+                try:
+                    # Use first chunk for financial metrics (usually in executive summary)
+                    first_chunk_metrics = self.extract_financial_metrics(chunks[0])
+                    metrics.extend(first_chunk_metrics)
+                    
+                    # If no metrics found, try with second chunk
+                    if not metrics and len(chunks) > 1:
+                        second_chunk_metrics = self.extract_financial_metrics(chunks[1])
+                        metrics.extend(second_chunk_metrics)
+                        
+                    logger.info(f"Extracted {len(metrics)} metrics using Hugging Face API")
+                except Exception as e:
+                    logger.error(f"Error extracting metrics with Hugging Face API: {str(e)}")
+            
+            # If no metrics found with API, try regex on multiple chunks
+            if not metrics:
+                logger.info("No metrics found with API, using regex pattern matching")
+                for chunk in chunks[:3]:
+                    chunk_metrics = self._extract_metrics_with_regex(chunk)
+                    metrics.extend(chunk_metrics)
+            
+            # If still no metrics, try more chunks with regex
+            if not metrics and len(chunks) > 3:
+                logger.info("No metrics found in first 3 chunks, searching in more chunks")
+                for chunk in chunks[3:6]:
+                    chunk_metrics = self._extract_metrics_with_regex(chunk)
+                    metrics.extend(chunk_metrics)
             
             # Remove duplicates based on metric name
             unique_metrics = []
@@ -355,6 +532,8 @@ class AIService:
             
             # Analyze sentiment from executive summary
             sentiment = self.analyze_sentiment(executive_summary)
+            
+            logger.info(f"Analysis complete: {len(unique_metrics)} metrics, {len(unique_risks)} risks")
             
             return {
                 "metrics": unique_metrics,
