@@ -4,8 +4,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-from backend.api.routes import router
-from backend.models.database import create_tables
+from api.routes import router
+from models.database import create_tables
 
 # Configure logging
 logging.basicConfig(
@@ -65,4 +65,4 @@ if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     
     logger.info(f"Starting server on {host}:{port}")
-    uvicorn.run("backend.main:app", host=host, port=port, reload=True) 
+    uvicorn.run("main:app", host=host, port=port, reload=True) 

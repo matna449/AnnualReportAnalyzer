@@ -4,7 +4,6 @@ from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 import torch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
-import anthropic
 import re
 import json
 
@@ -16,227 +15,308 @@ logger = logging.getLogger(__name__)
 class AIService:
     def __init__(self):
         self.huggingface_api_key = os.getenv("HUGGINGFACE_API_KEY")
-        self.claude_api_key = os.getenv("CLAUDE_API_KEY")
         self.model_name = os.getenv("MODEL_NAME", "google/flan-t5-large")
         self.chunk_size = int(os.getenv("CHUNK_SIZE", "4000"))
         self.overlap_size = int(os.getenv("OVERLAP_SIZE", "200"))
         
-        # Initialize Hugging Face model if API key is available
-        if self.huggingface_api_key:
-            try:
+        # Initialize Hugging Face models
+        try:
+            if self.huggingface_api_key:
                 self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
                 self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
                 self.summarizer = pipeline("summarization", model=self.model, tokenizer=self.tokenizer)
                 self.qa_pipeline = pipeline("question-answering", model=self.model, tokenizer=self.tokenizer)
+                self.text_generation = pipeline("text2text-generation", model=self.model, tokenizer=self.tokenizer)
                 logger.info(f"Initialized Hugging Face model: {self.model_name}")
-            except Exception as e:
-                logger.error(f"Error initializing Hugging Face model: {str(e)}")
+            else:
+                logger.warning("No Hugging Face API key provided. Using fallback methods.")
                 self.tokenizer = None
                 self.model = None
                 self.summarizer = None
                 self.qa_pipeline = None
-        else:
-            logger.warning("No Hugging Face API key provided. Some features may be limited.")
+                self.text_generation = None
+        except Exception as e:
+            logger.error(f"Error initializing Hugging Face model: {str(e)}")
             self.tokenizer = None
             self.model = None
             self.summarizer = None
             self.qa_pipeline = None
-        
-        # Initialize Claude client if API key is available
-        if self.claude_api_key:
-            try:
-                self.claude_client = anthropic.Anthropic(api_key=self.claude_api_key)
-                logger.info("Initialized Claude API client")
-            except Exception as e:
-                logger.error(f"Error initializing Claude API client: {str(e)}")
-                self.claude_client = None
-        else:
-            logger.warning("No Claude API key provided. Some features may be limited.")
-            self.claude_client = None
+            self.text_generation = None
     
     def summarize_text(self, text: str, max_length: int = 150, min_length: int = 50) -> str:
-        """Summarize text using Hugging Face model."""
-        if not self.summarizer:
-            raise ValueError("Summarizer not initialized. Please check your Hugging Face API key.")
-        
+        """Summarize text using Hugging Face model or fallback method."""
         try:
-            # Ensure text is within token limits
-            if len(text) > self.chunk_size:
-                text = text[:self.chunk_size]
-            
-            summary = self.summarizer(text, max_length=max_length, min_length=min_length, do_sample=False)
-            return summary[0]['summary_text']
+            if self.summarizer:
+                # Ensure text is within token limits
+                if len(text) > self.chunk_size:
+                    text = text[:self.chunk_size]
+                
+                summary = self.summarizer(text, max_length=max_length, min_length=min_length, do_sample=False)
+                return summary[0]['summary_text']
+            else:
+                # Fallback method: simple extractive summarization
+                return self._fallback_summarize(text, max_length)
         except Exception as e:
             logger.error(f"Error summarizing text: {str(e)}")
-            return ""
+            return self._fallback_summarize(text, max_length)
+    
+    def _fallback_summarize(self, text: str, max_length: int = 150) -> str:
+        """Simple extractive summarization as fallback."""
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        if len(sentences) <= 3:
+            return text
+        
+        # Take first sentence, a middle sentence, and last sentence
+        summary = sentences[0] + " " + sentences[len(sentences)//2] + " " + sentences[-1]
+        return summary[:max_length] + "..." if len(summary) > max_length else summary
     
     def extract_financial_metrics(self, text: str) -> List[Dict[str, Any]]:
-        """Extract financial metrics from text using Claude API."""
-        if not self.claude_client:
-            raise ValueError("Claude API client not initialized. Please check your Claude API key.")
-        
+        """Extract financial metrics from text using Hugging Face or regex patterns."""
         try:
-            prompt = f"""
-            You are a financial analyst extracting key metrics from an annual report. 
-            Extract all financial metrics from the following text. 
-            For each metric, provide the name, value, and unit (if applicable).
-            Format your response as a JSON array of objects with the following structure:
-            [
-                {{
-                    "name": "Revenue",
-                    "value": "394.3",
-                    "unit": "billion USD",
-                    "category": "financial"
-                }},
-                ...
-            ]
+            if self.text_generation:
+                prompt = f"Extract financial metrics from this text. For each metric, provide the name, value, and unit: {text[:1000]}"
+                
+                response = self.text_generation(prompt, max_length=512, do_sample=False)[0]['generated_text']
+                
+                # Parse the response to extract metrics
+                metrics = self._parse_metrics_from_text(response)
+                if metrics:
+                    return metrics
             
-            Text:
-            {text}
-            
-            JSON Output:
-            """
-            
-            response = self.claude_client.messages.create(
-                model="claude-3-sonnet-20240229",
-                max_tokens=1000,
-                temperature=0,
-                system="You are a financial analyst extracting structured data from annual reports. Always respond with valid JSON.",
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            
-            # Extract JSON from response
-            response_text = response.content[0].text
-            json_match = re.search(r'\[\s*\{.*\}\s*\]', response_text, re.DOTALL)
-            
-            if json_match:
-                json_str = json_match.group(0)
-                metrics = json.loads(json_str)
-                return metrics
-            else:
-                logger.warning("No valid JSON found in Claude response")
-                return []
+            # Fallback to regex pattern matching
+            return self._extract_metrics_with_regex(text)
                 
         except Exception as e:
             logger.error(f"Error extracting financial metrics: {str(e)}")
-            return []
+            return self._extract_metrics_with_regex(text)
+    
+    def _parse_metrics_from_text(self, text: str) -> List[Dict[str, Any]]:
+        """Parse metrics from generated text."""
+        metrics = []
+        # Look for patterns like "Revenue: $10.5 billion"
+        metric_patterns = [
+            r'(Revenue|Sales|Income|Profit|Loss|EPS|EBITDA|Assets|Liabilities|Equity|Margin|Growth|ROI|ROE|ROA)[\s:]+\$?([\d\.,]+)[\s]*(million|billion|trillion|M|B|T|USD|EUR|GBP|%)?',
+            r'(Net Income|Operating Income|Gross Profit|Total Revenue)[\s:]+\$?([\d\.,]+)[\s]*(million|billion|trillion|M|B|T|USD|EUR|GBP|%)?'
+        ]
+        
+        for pattern in metric_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                name = match.group(1).strip()
+                value = match.group(2).strip()
+                unit = match.group(3).strip() if match.group(3) else ""
+                
+                metrics.append({
+                    "name": name,
+                    "value": value,
+                    "unit": unit,
+                    "category": "financial"
+                })
+        
+        return metrics
+    
+    def _extract_metrics_with_regex(self, text: str) -> List[Dict[str, Any]]:
+        """Extract financial metrics using regex patterns."""
+        metrics = []
+        
+        # Common financial metrics patterns
+        patterns = [
+            # Revenue/Sales patterns
+            r'(Revenue|Sales)[\s:]+\$?([\d\.,]+)[\s]*(million|billion|trillion|M|B|T|USD|EUR|GBP)?',
+            r'(Net Income|Operating Income|Gross Profit)[\s:]+\$?([\d\.,]+)[\s]*(million|billion|trillion|M|B|T|USD|EUR|GBP)?',
+            r'(EPS|Earnings Per Share)[\s:]+\$?([\d\.,]+)',
+            r'(EBITDA)[\s:]+\$?([\d\.,]+)[\s]*(million|billion|trillion|M|B|T|USD|EUR|GBP)?',
+            r'(Operating Margin|Profit Margin|Gross Margin)[\s:]+\$?([\d\.,]+)[\s]*(%)?',
+            r'(ROI|ROE|ROA|Return on Investment|Return on Equity|Return on Assets)[\s:]+\$?([\d\.,]+)[\s]*(%)?',
+            r'(Total Assets|Total Liabilities|Total Equity)[\s:]+\$?([\d\.,]+)[\s]*(million|billion|trillion|M|B|T|USD|EUR|GBP)?',
+            r'(Cash Flow|Free Cash Flow|Operating Cash Flow)[\s:]+\$?([\d\.,]+)[\s]*(million|billion|trillion|M|B|T|USD|EUR|GBP)?',
+            r'(Dividend|Dividend Per Share)[\s:]+\$?([\d\.,]+)',
+            r'(Market Cap|Market Capitalization)[\s:]+\$?([\d\.,]+)[\s]*(million|billion|trillion|M|B|T|USD|EUR|GBP)?'
+        ]
+        
+        for pattern in patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                name = match.group(1).strip()
+                value = match.group(2).strip()
+                unit = match.group(3).strip() if len(match.groups()) > 2 and match.group(3) else ""
+                
+                metrics.append({
+                    "name": name,
+                    "value": value,
+                    "unit": unit,
+                    "category": "financial"
+                })
+        
+        return metrics
     
     def analyze_sentiment(self, text: str) -> Dict[str, Any]:
-        """Analyze sentiment in text using Hugging Face."""
-        if not self.model:
-            raise ValueError("Model not initialized. Please check your Hugging Face API key.")
-        
+        """Analyze sentiment in text using Hugging Face or fallback method."""
         try:
-            prompt = f"Analyze the sentiment of this text and classify it as positive, negative, or neutral: {text}"
-            
-            inputs = self.tokenizer(prompt, return_tensors="pt", max_length=512, truncation=True)
-            outputs = self.model.generate(**inputs, max_length=50)
-            result = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
-            # Extract sentiment from result
-            sentiment = "neutral"
-            if "positive" in result.lower():
-                sentiment = "positive"
-            elif "negative" in result.lower():
-                sentiment = "negative"
-            
-            return {
-                "sentiment": sentiment,
-                "explanation": result
-            }
+            if self.text_generation:
+                prompt = f"Analyze the sentiment of this text and classify it as positive, negative, or neutral: {text[:1000]}"
+                
+                result = self.text_generation(prompt, max_length=50, do_sample=False)[0]['generated_text']
+                
+                # Extract sentiment from result
+                sentiment = "neutral"
+                if "positive" in result.lower():
+                    sentiment = "positive"
+                elif "negative" in result.lower():
+                    sentiment = "negative"
+                
+                return {
+                    "sentiment": sentiment,
+                    "explanation": result
+                }
+            else:
+                # Fallback to simple keyword-based sentiment analysis
+                return self._fallback_sentiment_analysis(text)
         except Exception as e:
             logger.error(f"Error analyzing sentiment: {str(e)}")
-            return {"sentiment": "neutral", "explanation": "Error analyzing sentiment"}
+            return self._fallback_sentiment_analysis(text)
+    
+    def _fallback_sentiment_analysis(self, text: str) -> Dict[str, Any]:
+        """Simple keyword-based sentiment analysis as fallback."""
+        text_lower = text.lower()
+        
+        positive_words = ['growth', 'increase', 'profit', 'success', 'positive', 'opportunity', 
+                         'improve', 'gain', 'strong', 'advantage', 'innovation', 'progress']
+        negative_words = ['decline', 'decrease', 'loss', 'risk', 'negative', 'challenge', 
+                         'difficult', 'weak', 'threat', 'problem', 'failure', 'concern']
+        
+        positive_count = sum(1 for word in positive_words if word in text_lower)
+        negative_count = sum(1 for word in negative_words if word in text_lower)
+        
+        if positive_count > negative_count:
+            sentiment = "positive"
+            explanation = "The text contains more positive keywords than negative ones."
+        elif negative_count > positive_count:
+            sentiment = "negative"
+            explanation = "The text contains more negative keywords than positive ones."
+        else:
+            sentiment = "neutral"
+            explanation = "The text contains a balanced mix of positive and negative keywords."
+        
+        return {
+            "sentiment": sentiment,
+            "explanation": explanation
+        }
     
     def extract_risk_factors(self, text: str) -> List[str]:
-        """Extract risk factors from text using Claude API."""
-        if not self.claude_client:
-            raise ValueError("Claude API client not initialized. Please check your Claude API key.")
-        
+        """Extract risk factors from text using Hugging Face or pattern matching."""
         try:
-            prompt = f"""
-            You are a financial analyst extracting risk factors from an annual report.
-            Extract the key risk factors mentioned in the following text.
-            Format your response as a JSON array of strings, each representing a distinct risk factor.
+            if self.text_generation:
+                prompt = f"Extract the key risk factors mentioned in this text: {text[:1000]}"
+                
+                response = self.text_generation(prompt, max_length=512, do_sample=False)[0]['generated_text']
+                
+                # Parse the response to extract risk factors
+                risks = self._parse_risks_from_text(response)
+                if risks:
+                    return risks
             
-            Text:
-            {text}
-            
-            JSON Output:
-            """
-            
-            response = self.claude_client.messages.create(
-                model="claude-3-sonnet-20240229",
-                max_tokens=1000,
-                temperature=0,
-                system="You are a financial analyst extracting structured data from annual reports. Always respond with valid JSON.",
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            
-            # Extract JSON from response
-            response_text = response.content[0].text
-            json_match = re.search(r'\[\s*".*"\s*\]', response_text, re.DOTALL)
-            
-            if json_match:
-                json_str = json_match.group(0)
-                risks = json.loads(json_str)
-                return risks
-            else:
-                logger.warning("No valid JSON found in Claude response")
-                return []
+            # Fallback to pattern matching
+            return self._extract_risks_with_patterns(text)
                 
         except Exception as e:
             logger.error(f"Error extracting risk factors: {str(e)}")
-            return []
+            return self._extract_risks_with_patterns(text)
+    
+    def _parse_risks_from_text(self, text: str) -> List[str]:
+        """Parse risk factors from generated text."""
+        risks = []
+        
+        # Split by common list markers
+        lines = re.split(r'\n+|\d+\.\s+|\-\s+|\*\s+', text)
+        
+        for line in lines:
+            line = line.strip()
+            if len(line) > 20 and any(word in line.lower() for word in ['risk', 'challenge', 'threat', 'concern', 'uncertainty']):
+                risks.append(line)
+        
+        return risks
+    
+    def _extract_risks_with_patterns(self, text: str) -> List[str]:
+        """Extract risk factors using pattern matching."""
+        risks = []
+        
+        # Look for risk section
+        risk_section_pattern = r'(?i)(Risk Factors|Risks and Uncertainties|Principal Risks|Key Risks).*?(?=\n\s*\n|$)'
+        risk_section_match = re.search(risk_section_pattern, text, re.DOTALL)
+        
+        if risk_section_match:
+            risk_section = risk_section_match.group(0)
+            
+            # Extract bullet points or numbered items
+            risk_items = re.findall(r'(?:\n\s*[\•\-\*]|\n\s*\d+\.)\s*(.*?)(?=\n\s*[\•\-\*]|\n\s*\d+\.|\n\s*\n|$)', risk_section, re.DOTALL)
+            
+            for item in risk_items:
+                item = item.strip()
+                if len(item) > 20:
+                    risks.append(item)
+        
+        # If no structured risks found, look for risk-related sentences
+        if not risks:
+            sentences = re.split(r'(?<=[.!?])\s+', text)
+            for sentence in sentences:
+                if len(sentence) > 30 and any(word in sentence.lower() for word in ['risk', 'challenge', 'threat', 'concern', 'uncertainty']):
+                    risks.append(sentence.strip())
+        
+        return risks[:10]  # Limit to top 10 risks
     
     def generate_business_outlook(self, text: str) -> str:
-        """Generate a business outlook summary using Claude API."""
-        if not self.claude_client:
-            raise ValueError("Claude API client not initialized. Please check your Claude API key.")
-        
+        """Generate a business outlook summary using Hugging Face or fallback method."""
         try:
-            prompt = f"""
-            You are a financial analyst summarizing the business outlook from an annual report.
-            Based on the following text, provide a concise summary of the company's future outlook, 
-            strategic plans, and growth expectations.
-            
-            Text:
-            {text}
-            
-            Business Outlook Summary:
-            """
-            
-            response = self.claude_client.messages.create(
-                model="claude-3-sonnet-20240229",
-                max_tokens=500,
-                temperature=0,
-                system="You are a financial analyst summarizing business outlooks from annual reports.",
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            
-            return response.content[0].text.strip()
+            if self.text_generation:
+                prompt = f"Summarize the business outlook, strategic plans, and growth expectations from this text: {text[:1000]}"
+                
+                response = self.text_generation(prompt, max_length=300, do_sample=False)[0]['generated_text']
+                return response.strip()
+            else:
+                # Fallback to extractive method
+                return self._extract_outlook_statements(text)
                 
         except Exception as e:
             logger.error(f"Error generating business outlook: {str(e)}")
-            return ""
+            return self._extract_outlook_statements(text)
+    
+    def _extract_outlook_statements(self, text: str) -> str:
+        """Extract outlook statements using pattern matching."""
+        outlook_statements = []
+        
+        # Look for outlook section
+        outlook_section_pattern = r'(?i)(Outlook|Future Prospects|Forward-Looking Statements|Strategic Priorities|Future Plans).*?(?=\n\s*\n|$)'
+        outlook_section_match = re.search(outlook_section_pattern, text, re.DOTALL)
+        
+        if outlook_section_match:
+            outlook_section = outlook_section_match.group(0)
+            sentences = re.split(r'(?<=[.!?])\s+', outlook_section)
+            outlook_statements = sentences[:5]  # Take first 5 sentences
+        
+        # If no structured outlook found, look for outlook-related sentences
+        if not outlook_statements:
+            sentences = re.split(r'(?<=[.!?])\s+', text)
+            for sentence in sentences:
+                if len(sentence) > 30 and any(word in sentence.lower() for word in ['future', 'plan', 'expect', 'strategy', 'growth', 'outlook', 'anticipate']):
+                    outlook_statements.append(sentence.strip())
+                    if len(outlook_statements) >= 5:
+                        break
+        
+        return " ".join(outlook_statements)
     
     def answer_question(self, question: str, context: str) -> str:
         """Answer a specific question based on the provided context."""
-        if not self.qa_pipeline:
-            raise ValueError("QA pipeline not initialized. Please check your Hugging Face API key.")
-        
         try:
-            result = self.qa_pipeline(question=question, context=context)
-            return result['answer']
+            if self.qa_pipeline:
+                result = self.qa_pipeline(question=question, context=context[:self.chunk_size])
+                return result['answer']
+            else:
+                # Simple fallback
+                return "Question answering is not available without the Hugging Face model."
         except Exception as e:
             logger.error(f"Error answering question: {str(e)}")
-            return ""
+            return "Error processing question."
     
     def analyze_report(self, text: str) -> Dict[str, Any]:
         """Perform comprehensive analysis of an annual report."""
@@ -250,73 +330,76 @@ class AIService:
                 chunk_metrics = self.extract_financial_metrics(chunk)
                 metrics.extend(chunk_metrics)
             
-            # Generate executive summary
-            executive_summary = self.summarize_text(chunks[0], max_length=200, min_length=100)
+            # Remove duplicates based on metric name
+            unique_metrics = []
+            metric_names = set()
+            for metric in metrics:
+                if metric["name"].lower() not in metric_names:
+                    unique_metrics.append(metric)
+                    metric_names.add(metric["name"].lower())
             
-            # Extract risk factors from later chunks (likely to contain risk section)
+            # Extract risk factors from middle chunks (likely to contain risk section)
             risks = []
-            for chunk in chunks[3:]:
+            for chunk in chunks[1:4]:
                 chunk_risks = self.extract_risk_factors(chunk)
                 risks.extend(chunk_risks)
-                if len(risks) >= 10:  # Limit to top 10 risks
-                    risks = risks[:10]
-                    break
             
-            # Generate business outlook from the last chunks (likely to contain forward-looking statements)
-            outlook = self.generate_business_outlook(chunks[-1])
+            # Remove duplicates and limit to top 10
+            unique_risks = list(dict.fromkeys([risk for risk in risks if risk]))[:10]
             
-            # Analyze sentiment of management discussion
-            sentiment = self.analyze_sentiment(chunks[1])
+            # Generate summaries from first and last chunks
+            executive_summary = self.summarize_text(chunks[0], max_length=200)
+            
+            # Get business outlook from last chunks (likely to contain forward-looking statements)
+            outlook = self.generate_business_outlook(chunks[-2] if len(chunks) > 1 else chunks[0])
+            
+            # Analyze sentiment from executive summary
+            sentiment = self.analyze_sentiment(executive_summary)
             
             return {
-                "metrics": metrics,
+                "metrics": unique_metrics,
+                "risks": unique_risks,
                 "summaries": {
                     "executive": executive_summary,
                     "outlook": outlook
                 },
-                "risks": risks,
                 "sentiment": sentiment
             }
         except Exception as e:
             logger.error(f"Error analyzing report: {str(e)}")
             return {
                 "metrics": [],
-                "summaries": {
-                    "executive": "",
-                    "outlook": ""
-                },
                 "risks": [],
-                "sentiment": {"sentiment": "neutral", "explanation": ""}
+                "summaries": {
+                    "executive": "Error generating executive summary.",
+                    "outlook": "Error generating business outlook."
+                },
+                "sentiment": {
+                    "sentiment": "neutral",
+                    "explanation": "Error analyzing sentiment."
+                }
             }
     
     def _chunk_text(self, text: str) -> List[str]:
-        """Split text into chunks of appropriate size for the model."""
+        """Split text into chunks for processing."""
         if not text:
             return []
         
+        # Simple chunking by character count with overlap
         chunks = []
         start = 0
-        text_length = len(text)
-        
-        while start < text_length:
-            end = min(start + self.chunk_size, text_length)
+        while start < len(text):
+            end = min(start + self.chunk_size, len(text))
             
-            # If we're not at the end of the text, try to find a good breaking point
-            if end < text_length:
-                # Try to find a newline or period to break at
-                newline_pos = text.rfind('\n', start, end)
-                period_pos = text.rfind('. ', start, end)
-                
-                # Use the latest good breaking point
-                if newline_pos > start + self.chunk_size // 2:
-                    end = newline_pos + 1  # Include the newline
-                elif period_pos > start + self.chunk_size // 2:
-                    end = period_pos + 2  # Include the period and space
+            # If not at the end, try to break at a sentence boundary
+            if end < len(text):
+                # Look for sentence boundary within the last 20% of the chunk
+                boundary_search_start = max(start + int(self.chunk_size * 0.8), start)
+                sentence_boundary = text.rfind('. ', boundary_search_start, end)
+                if sentence_boundary != -1:
+                    end = sentence_boundary + 1  # Include the period
             
-            # Add the chunk
             chunks.append(text[start:end])
-            
-            # Move the start position, accounting for overlap
-            start = end - self.overlap_size if end < text_length else text_length
+            start = end - self.overlap_size if end - self.overlap_size > start else end
         
         return chunks 

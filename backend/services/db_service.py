@@ -1,11 +1,11 @@
 import logging
 from typing import List, Dict, Any, Optional, Union
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, or_
+from sqlalchemy import desc, or_, func
 from datetime import datetime
 
-from backend.models.database import Company, Report, Metric, Summary
-from backend.models.schemas import (
+from models.database import Company, Report, Metric, Summary
+from models.schemas import (
     CompanyCreate, CompanyUpdate, ReportCreate, 
     MetricCreate, SummaryCreate, SearchParams
 )

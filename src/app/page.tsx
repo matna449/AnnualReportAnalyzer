@@ -79,12 +79,22 @@ export default function Home() {
       formData.append('year', reportYear);
       
       console.log('Uploading file:', selectedFile.name, 'Size:', selectedFile.size, 'Type:', selectedFile.type);
+      console.log('Request URL:', '/api/reports/upload');
       
       // Send the request to the backend
-      const response = await fetch('/api/reports/upload/', {
+      const response = await fetch('/api/reports/upload', {
         method: 'POST',
         body: formData,
       });
+      
+      console.log('Response status:', response.status, response.statusText);
+      
+      // Log headers in a way that works with all TypeScript targets
+      const headers: Record<string, string> = {};
+      response.headers.forEach((value, key) => {
+        headers[key] = value;
+      });
+      console.log('Response headers:', headers);
       
       // Check if the response is ok before trying to parse JSON
       if (!response.ok) {

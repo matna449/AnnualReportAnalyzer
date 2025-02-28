@@ -4,10 +4,10 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from datetime import datetime
 
-from backend.services.pdf_service import PDFService
-from backend.services.ai_service import AIService
-from backend.services.db_service import DBService
-from backend.models.schemas import (
+from services.pdf_service import PDFService
+from services.ai_service import AIService
+from services.db_service import DBService
+from models.schemas import (
     CompanyCreate, ReportCreate, MetricCreate, SummaryCreate
 )
 

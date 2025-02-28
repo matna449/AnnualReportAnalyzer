@@ -1,6 +1,6 @@
 # Annual Report Analyzer
 
-An AI-powered application for analyzing company annual reports. Extract key financial metrics, risk factors, and business outlooks from PDF reports using Hugging Face Transformers and Claude API.
+An AI-powered application for analyzing company annual reports. Extract key financial metrics, risk factors, and business outlooks from PDF reports using Hugging Face Transformers.
 
 ## Features
 
@@ -11,6 +11,7 @@ An AI-powered application for analyzing company annual reports. Extract key fina
 - Sentiment analysis
 - Report comparison
 - Historical data tracking
+- Interactive dashboard
 
 ## Tech Stack
 
@@ -21,7 +22,6 @@ An AI-powered application for analyzing company annual reports. Extract key fina
 - PyPDF2
 - pdfplumber
 - Hugging Face Transformers
-- Anthropic Claude API
 
 ### Frontend
 - React
@@ -36,7 +36,6 @@ An AI-powered application for analyzing company annual reports. Extract key fina
 - Python 3.9+
 - Node.js 18+
 - Hugging Face API key (get one at https://huggingface.co/settings/tokens)
-- Claude API key (optional, get one at https://console.anthropic.com/settings/keys)
 
 ### Setup and Running
 
@@ -78,7 +77,8 @@ The backend will be available at http://localhost:8000 and the frontend at http:
 
 4. Start the backend server:
    ```bash
-   python -m backend.main
+   cd backend
+   python run.py
    ```
 
 ##### Frontend
@@ -101,11 +101,60 @@ The backend will be available at http://localhost:8000 and the frontend at http:
 4. Explore the dashboard for insights
 5. Compare reports and track metrics over time
 
+## Troubleshooting
+
+### Backend Import Issues
+
+If you encounter import errors when starting the backend, make sure you're running the server from the `backend` directory:
+
+```bash
+cd backend
+python run.py
+```
+
+This ensures that the Python modules can be imported correctly without needing to use the `backend.` prefix.
+
+### Sample Data
+
+To generate sample data for testing:
+
+```bash
+cd backend
+python utils/generate_sample_data.py
+```
+
+This will create sample companies, reports, metrics, and summaries in the database.
+
 ## API Documentation
 
 The API documentation is available at:
 - Swagger UI: http://localhost:8000/docs
 - ReDoc: http://localhost:8000/redoc
+
+## Project Structure
+
+```
+├── backend/                  # Python FastAPI backend
+│   ├── api/                  # API routes
+│   ├── models/               # Database models and schemas
+│   ├── services/             # Business logic services
+│   ├── tests/                # Unit tests
+│   ├── uploads/              # Uploaded PDF files
+│   ├── utils/                # Utility functions
+│   ├── .env.example          # Environment variables template
+│   ├── main.py               # FastAPI application
+│   ├── run.py                # Entry point script
+│   └── requirements.txt      # Python dependencies
+│
+├── src/                      # React frontend
+│   ├── app/                  # Next.js pages
+│   ├── components/           # React components
+│   └── styles/               # CSS styles
+│
+├── run_backend.sh            # Script to run the backend
+├── run_frontend.sh           # Script to run the frontend
+└── run_tests.sh              # Script to run tests
+```
 
 ## License
 

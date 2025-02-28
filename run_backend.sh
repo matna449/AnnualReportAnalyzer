@@ -34,4 +34,5 @@ fi
 
 # Run the backend server
 echo "Starting backend server..."
-python -m backend.main 
+cd backend
+python  run.py 

@@ -5,12 +5,12 @@ from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime
 
-from backend.models.database_session import get_db
-from backend.models.schemas import (
+from models.database_session import get_db
+from models.schemas import (
     Company, CompanyCreate, CompanyUpdate,
     Report, SearchParams, ComparisonRequest
 )
-from backend.services.analysis_service import AnalysisService
+from services.analysis_service import AnalysisService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -23,26 +23,16 @@ async def create_company(
     db: Session = Depends(get_db)
 ):
     """Create a new company."""
-    try:
-        from backend.services.db_service import DBService
-        return DBService.create_company(db, company)
-    except Exception as e:
-        logger.error(f"Error creating company: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error creating company: {str(e)}")
+    return DBService.create_company(db, company)
 
 @router.get("/companies/", response_model=List[Company])
 async def get_companies(
+    db: Session = Depends(get_db),
     skip: int = 0,
-    limit: int = 100,
-    db: Session = Depends(get_db)
+    limit: int = 100
 ):
-    """Get all companies with pagination."""
-    try:
-        from backend.services.db_service import DBService
-        return DBService.get_companies(db, skip, limit)
-    except Exception as e:
-        logger.error(f"Error getting companies: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting companies: {str(e)}")
+    """Get all companies."""
+    return DBService.get_companies(db, skip, limit)
 
 @router.get("/companies/{company_id}", response_model=Company)
 async def get_company(
@@ -50,17 +40,10 @@ async def get_company(
     db: Session = Depends(get_db)
 ):
     """Get a company by ID."""
-    try:
-        from backend.services.db_service import DBService
-        company = DBService.get_company(db, company_id)
-        if not company:
-            raise HTTPException(status_code=404, detail=f"Company with ID {company_id} not found")
-        return company
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting company: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting company: {str(e)}")
+    company = DBService.get_company(db, company_id)
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    return company
 
 @router.put("/companies/{company_id}", response_model=Company)
 async def update_company(
@@ -82,7 +65,7 @@ async def update_company(
         raise HTTPException(status_code=500, detail=f"Error updating company: {str(e)}")
 
 # Report routes
-@router.post("/reports/upload/")
+@router.post("/reports/upload")
 async def upload_report(
     file: UploadFile = File(...),
     company_name: str = Form(...),
@@ -92,6 +75,7 @@ async def upload_report(
     db: Session = Depends(get_db)
 ):
     """Upload and process an annual report."""
+    logger.info(f"Received upload request for file: {file.filename}, company: {company_name}, year: {year}")
     try:
         # Validate file type
         if not file.filename or not file.filename.lower().endswith('.pdf'):
@@ -172,51 +156,34 @@ async def upload_report(
 
 @router.get("/reports/")
 async def get_reports(
+    db: Session = Depends(get_db),
     skip: int = 0,
-    limit: int = 100,
-    db: Session = Depends(get_db)
+    limit: int = 100
 ):
-    """Get all reports with pagination."""
-    try:
-        from backend.services.db_service import DBService
-        reports = DBService.get_reports(db, skip, limit)
-        
-        # Convert SQLAlchemy objects to dictionaries
-        result = []
-        for report in reports:
-            company = DBService.get_company(db, report.company_id)
-            result.append({
-                "id": report.id,
-                "company_id": report.company_id,
-                "company_name": company.name if company else "",
-                "year": report.year,
-                "file_name": report.file_name,
-                "upload_date": report.upload_date,
-                "processing_status": report.processing_status,
-                "page_count": report.page_count
-            })
-        
-        return result
-    except Exception as e:
-        logger.error(f"Error getting reports: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting reports: {str(e)}")
+    """Get all reports."""
+    return DBService.get_reports(db, skip, limit)
 
-@router.get("/reports/{report_id}")
-async def get_report_analysis(
+@router.get("/reports/{report_id}", response_model=Dict[str, Any])
+async def get_report(
     report_id: int,
     db: Session = Depends(get_db)
 ):
-    """Get the analysis for a specific report."""
-    try:
-        result = await analysis_service.get_report_analysis(db, report_id)
-        if not result:
-            raise HTTPException(status_code=404, detail=f"Report with ID {report_id} not found")
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting report analysis: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting report analysis: {str(e)}")
+    """Get a report by ID with all associated data."""
+    report = DBService.get_report(db, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    
+    result = {
+        "id": report.id,
+        "company_id": report.company_id,
+        "company_name": report.company.name if report.company else "",
+        "year": report.year,
+        "file_name": report.file_name,
+        "upload_date": report.upload_date,
+        "processing_status": report.processing_status,
+        "page_count": report.page_count
+    }
+    return result
 
 @router.get("/companies/{company_id}/reports")
 async def get_company_reports(
@@ -255,102 +222,58 @@ async def get_company_reports(
         logger.error(f"Error getting company reports: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error getting company reports: {str(e)}")
 
-@router.post("/reports/search/")
+@router.post("/reports/search/", response_model=Dict[str, List])
 async def search_reports(
-    params: SearchParams,
-    skip: int = 0,
-    limit: int = 100,
+    search_params: SearchParams,
     db: Session = Depends(get_db)
 ):
-    """Search for reports based on various criteria."""
-    try:
-        from backend.services.db_service import DBService
-        reports = DBService.search_reports(db, params, skip, limit)
-        
-        # Convert SQLAlchemy objects to dictionaries
-        result = []
-        for report in reports:
-            company = DBService.get_company(db, report.company_id)
-            result.append({
-                "id": report.id,
-                "company_id": report.company_id,
-                "company_name": company.name if company else "",
-                "year": report.year,
-                "file_name": report.file_name,
-                "upload_date": report.upload_date,
-                "processing_status": report.processing_status,
-                "page_count": report.page_count
-            })
-        
-        return result
-    except Exception as e:
-        logger.error(f"Error searching reports: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error searching reports: {str(e)}")
+    """Search for reports and companies based on search parameters."""
+    results = DBService.search_reports(db, search_params)
+    return results
 
-@router.post("/reports/compare/")
+@router.post("/reports/compare", response_model=Dict[str, Any])
 async def compare_reports(
-    comparison: ComparisonRequest,
+    comparison_request: ComparisonRequest,
     db: Session = Depends(get_db)
 ):
-    """Compare multiple reports."""
-    try:
-        if len(comparison.report_ids) < 2:
-            raise HTTPException(status_code=400, detail="At least two reports are required for comparison")
-        
-        result = await analysis_service.compare_reports(db, comparison.report_ids)
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error comparing reports: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error comparing reports: {str(e)}")
+    """Compare metrics between multiple reports."""
+    result = DBService.compare_reports(db, comparison_request)
+    return result
 
-@router.get("/companies/{company_id}/metrics")
-async def get_company_metrics_history(
+@router.get("/companies/{company_id}/metrics", response_model=Dict[str, List])
+async def get_company_metrics(
     company_id: int,
-    metric_names: List[str] = Query(...),
+    metric_names: str = Query(None),
     db: Session = Depends(get_db)
 ):
-    """Get historical data for specific metrics for a company."""
-    try:
-        from backend.services.db_service import DBService
-        company = DBService.get_company(db, company_id)
-        if not company:
-            raise HTTPException(status_code=404, detail=f"Company with ID {company_id} not found")
-        
-        result = await analysis_service.get_company_metrics_history(db, company_id, metric_names)
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting company metrics history: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting company metrics history: {str(e)}")
+    """Get metrics for a specific company across all reports."""
+    # Parse metric names if provided
+    metric_list = None
+    if metric_names:
+        metric_list = [name.strip() for name in metric_names.split(",")]
+    
+    metrics = DBService.get_company_metrics(db, company_id, metric_list)
+    return metrics
 
 # Dashboard routes
-@router.get("/dashboard/summary")
+@router.get("/dashboard/summary", response_model=Dict[str, Any])
 async def get_dashboard_summary(
     db: Session = Depends(get_db)
 ):
     """Get summary statistics for the dashboard."""
     try:
-        from backend.services.db_service import DBService
-        
-        # Get total number of companies
-        companies = DBService.get_companies(db)
-        company_count = len(companies)
-        
-        # Get total number of reports
-        reports = DBService.get_reports(db)
-        report_count = len(reports)
+        # Get counts
+        company_count = DBService.get_company_count(db)
+        report_count = DBService.get_report_count(db)
         
         # Get latest upload date
         latest_upload_date = None
-        if reports:
-            latest_upload_date = max(report.upload_date for report in reports)
+        if report_count > 0:
+            latest_upload_date = max(report.upload_date for report in DBService.get_reports(db))
         
         # Get reports by status
         status_counts = {}
-        for report in reports:
+        for report in DBService.get_reports(db):
             status = report.processing_status
             if status not in status_counts:
                 status_counts[status] = 0
@@ -358,7 +281,7 @@ async def get_dashboard_summary(
         
         # Get reports by year
         year_counts = {}
-        for report in reports:
+        for report in DBService.get_reports(db):
             year = report.year
             if year not in year_counts:
                 year_counts[year] = 0
@@ -375,34 +298,27 @@ async def get_dashboard_summary(
         logger.error(f"Error getting dashboard summary: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error getting dashboard summary: {str(e)}")
 
-@router.get("/dashboard/recent-reports")
+@router.get("/dashboard/recent-reports", response_model=List[Dict[str, Any]])
 async def get_recent_reports(
-    limit: int = 5,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    limit: int = 5
 ):
     """Get the most recently uploaded reports for the dashboard."""
-    try:
-        from backend.services.db_service import DBService
-        reports = DBService.get_reports(db, 0, limit)
-        
-        # Convert SQLAlchemy objects to dictionaries
-        result = []
-        for report in reports:
-            company = DBService.get_company(db, report.company_id)
-            result.append({
-                "id": report.id,
-                "company_id": report.company_id,
-                "company_name": company.name if company else "",
-                "year": report.year,
-                "file_name": report.file_name,
-                "upload_date": report.upload_date,
-                "processing_status": report.processing_status
-            })
-        
-        return result
-    except Exception as e:
-        logger.error(f"Error getting recent reports: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting recent reports: {str(e)}")
+    reports = DBService.get_recent_reports(db, limit)
+    
+    result = []
+    for report in reports:
+        result.append({
+            "id": report.id,
+            "company_id": report.company_id,
+            "company_name": report.company.name if report.company else "",
+            "year": report.year,
+            "file_name": report.file_name,
+            "upload_date": report.upload_date,
+            "processing_status": report.processing_status
+        })
+    
+    return result
 
 @router.get("/dashboard/sectors")
 async def get_sector_distribution(

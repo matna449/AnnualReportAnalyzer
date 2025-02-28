@@ -41,6 +41,8 @@ class ReportBase(BaseModel):
 class ReportCreate(ReportBase):
     file_name: str
     file_path: str
+    processing_status: str = "pending"
+    page_count: Optional[int] = None
 
 
 class ReportUpdate(BaseModel):

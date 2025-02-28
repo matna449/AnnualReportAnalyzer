@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Typography, 
   Box, 
@@ -14,8 +14,15 @@ import {
   CardContent,
   List,
   ListItem,
-  ListItemText
+  ListItemText,
+  Button,
+  CircularProgress,
+  Alert
 } from '@mui/material';
+import { 
+  Download as DownloadIcon,
+  Refresh as RefreshIcon
+} from '@mui/icons-material';
 import PageLayout from '@/components/PageLayout';
 
 interface TabPanelProps {
@@ -44,58 +51,160 @@ function TabPanel(props: TabPanelProps) {
   );
 }
 
-// Sample data - in a real app, this would be fetched from an API based on the ID
-const sampleReport = {
-  id: 1,
-  company: 'Apple Inc.',
-  ticker: 'AAPL',
-  year: '2023',
-  uploadDate: 'Feb 26, 2024',
-  sector: 'Technology',
-  summary: 'Apple Inc. reported strong financial performance in fiscal year 2023, with revenue growth across most product categories and geographic segments. The company continues to invest in innovation and expand its services ecosystem.',
-  financials: {
-    revenue: '$394.3 billion',
-    netIncome: '$96.9 billion',
-    eps: '$6.14',
-    cashFlow: '$121.2 billion',
-    rnd: '$29.9 billion',
-  },
-  keyMetrics: [
-    { name: 'Revenue Growth', value: '8.1%' },
-    { name: 'Profit Margin', value: '24.6%' },
-    { name: 'Return on Equity', value: '160.2%' },
-    { name: 'Debt to Equity', value: '1.52' },
-    { name: 'Current Ratio', value: '1.07' },
-  ],
-  risks: [
-    'Global economic conditions and their impact on consumer spending',
-    'Supply chain disruptions and manufacturing challenges',
-    'Intense competition in all product categories',
-    'Regulatory challenges in multiple jurisdictions',
-    'Rapid technological changes requiring continuous innovation',
-  ],
-  outlook: 'The company expects continued growth in its Services segment and stable performance in its hardware business. Apple plans to expand its AI capabilities across its product lineup and invest in emerging technologies.'
-};
-
 export default function ReportDetails({ params }: { params: { id: string } }) {
   const [tabValue, setTabValue] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [reportData, setReportData] = useState<any>(null);
+  const [relatedReports, setRelatedReports] = useState<any[]>([]);
 
   const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
     setTabValue(newValue);
   };
 
+  useEffect(() => {
+    const fetchReportData = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        
+        // Fetch report analysis data
+        const response = await fetch(`/api/reports/${params.id}`);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch report data: ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        console.log('Report data:', data);
+        setReportData(data);
+        
+        // Fetch related reports (same company or sector)
+        if (data.company_id) {
+          const relatedResponse = await fetch(`/api/companies/${data.company_id}/reports`);
+          if (relatedResponse.ok) {
+            const relatedData = await relatedResponse.json();
+            // Filter out the current report
+            setRelatedReports(relatedData.filter((report: any) => report.id !== parseInt(params.id)));
+          }
+        }
+      } catch (err) {
+        console.error('Error fetching report data:', err);
+        setError(err instanceof Error ? err.message : 'An error occurred while fetching report data');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchReportData();
+  }, [params.id]);
+
+  const handleExportCSV = () => {
+    if (!reportData) return;
+    
+    // Create CSV content
+    let csvContent = "data:text/csv;charset=utf-8,";
+    
+    // Add report info
+    csvContent += `Report ID,${reportData.id}\n`;
+    csvContent += `Company,${reportData.company_name}\n`;
+    csvContent += `Year,${reportData.year}\n`;
+    csvContent += `Upload Date,${reportData.upload_date}\n\n`;
+    
+    // Add metrics
+    csvContent += "Metric Name,Value,Unit\n";
+    reportData.metrics.forEach((metric: any) => {
+      csvContent += `${metric.name},${metric.value},${metric.unit}\n`;
+    });
+    
+    // Add summaries
+    csvContent += "\nSummaries\n";
+    Object.entries(reportData.summaries).forEach(([key, value]: [string, any]) => {
+      csvContent += `${key},${value.replace(/,/g, ';').replace(/\n/g, ' ')}\n`;
+    });
+    
+    // Create download link
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `report_${reportData.company_name}_${reportData.year}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  if (loading) {
+    return (
+      <PageLayout>
+        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '50vh' }}>
+          <CircularProgress />
+        </Box>
+      </PageLayout>
+    );
+  }
+
+  if (error) {
+    return (
+      <PageLayout>
+        <Alert severity="error" sx={{ mb: 2 }}>
+          {error}
+        </Alert>
+        <Button 
+          variant="contained" 
+          startIcon={<RefreshIcon />} 
+          onClick={() => window.location.reload()}
+        >
+          Retry
+        </Button>
+      </PageLayout>
+    );
+  }
+
+  if (!reportData) {
+    return (
+      <PageLayout>
+        <Alert severity="info">No report data found.</Alert>
+      </PageLayout>
+    );
+  }
+
+  // Format metrics for display
+  const financialMetrics = reportData.metrics.filter((m: any) => 
+    ['revenue', 'income', 'profit', 'eps', 'ebitda', 'assets', 'liabilities', 'equity', 'cash'].some(
+      term => m.name.toLowerCase().includes(term)
+    )
+  );
+
+  const keyMetrics = reportData.metrics.filter((m: any) => 
+    ['margin', 'growth', 'ratio', 'return', 'roi', 'roe', 'roa'].some(
+      term => m.name.toLowerCase().includes(term)
+    )
+  );
+
   return (
     <PageLayout>
-      <Box sx={{ mb: 4 }}>
-        <Typography variant="h4" component="h1" gutterBottom>
-          {sampleReport.company} ({sampleReport.ticker})
-        </Typography>
-        <Typography variant="subtitle1" color="text.secondary">
-          Annual Report {sampleReport.year} • Uploaded on {sampleReport.uploadDate}
-        </Typography>
-        <Box sx={{ mt: 1 }}>
-          <Chip label={sampleReport.sector} color="primary" size="small" />
-        </Box>
+      <Box sx={{ mb: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div>
+          <Typography variant="h4" component="h1" gutterBottom>
+            {reportData.company_name}
+          </Typography>
+          <Typography variant="subtitle1" color="text.secondary">
+            Annual Report {reportData.year} • Uploaded on {new Date(reportData.upload_date).toLocaleDateString()}
+          </Typography>
+          <Box sx={{ mt: 1 }}>
+            <Chip 
+              label={reportData.processing_status} 
+              color={reportData.processing_status === 'completed' ? 'success' : 'warning'} 
+              size="small" 
+            />
+          </Box>
+        </div>
+        <Button 
+          variant="outlined" 
+          startIcon={<DownloadIcon />} 
+          onClick={handleExportCSV}
+        >
+          Export CSV
+        </Button>
       </Box>
       
       <Grid container spacing={3}>
@@ -116,50 +225,49 @@ export default function ReportDetails({ params }: { params: { id: string } }) {
             
             <TabPanel value={tabValue} index={0}>
               <Typography variant="body1" paragraph>
-                {sampleReport.summary}
+                {reportData.summaries?.executive || "No executive summary available."}
               </Typography>
               <Divider sx={{ my: 2 }} />
               <Typography variant="h6" gutterBottom>
-                Key Highlights
+                Sentiment Analysis
               </Typography>
-              <List>
-                <ListItem>
-                  <ListItemText 
-                    primary="Strong Services Growth" 
-                    secondary="Services revenue reached an all-time high, growing 16.2% year-over-year." 
-                  />
-                </ListItem>
-                <ListItem>
-                  <ListItemText 
-                    primary="Expanding Product Ecosystem" 
-                    secondary="Introduced new products across multiple categories, strengthening the ecosystem." 
-                  />
-                </ListItem>
-                <ListItem>
-                  <ListItemText 
-                    primary="International Expansion" 
-                    secondary="Significant growth in emerging markets, particularly in India and Southeast Asia." 
-                  />
-                </ListItem>
-              </List>
+              <Box sx={{ mb: 2 }}>
+                <Chip 
+                  label={reportData.sentiment?.sentiment || "Neutral"} 
+                  color={
+                    reportData.sentiment?.sentiment === 'positive' ? 'success' : 
+                    reportData.sentiment?.sentiment === 'negative' ? 'error' : 'default'
+                  }
+                  sx={{ mr: 1 }}
+                />
+              </Box>
+              <Typography variant="body2" color="text.secondary">
+                {reportData.sentiment?.explanation || "No sentiment analysis available."}
+              </Typography>
             </TabPanel>
             
             <TabPanel value={tabValue} index={1}>
               <Grid container spacing={3}>
-                {Object.entries(sampleReport.financials).map(([key, value]) => (
-                  <Grid item xs={12} sm={6} md={4} key={key}>
-                    <Card>
-                      <CardContent>
-                        <Typography variant="subtitle2" color="text.secondary">
-                          {key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase())}
-                        </Typography>
-                        <Typography variant="h5" component="div">
-                          {value}
-                        </Typography>
-                      </CardContent>
-                    </Card>
+                {financialMetrics.length > 0 ? (
+                  financialMetrics.map((metric: any, index: number) => (
+                    <Grid item xs={12} sm={6} md={4} key={index}>
+                      <Card>
+                        <CardContent>
+                          <Typography variant="subtitle2" color="text.secondary">
+                            {metric.name}
+                          </Typography>
+                          <Typography variant="h5" component="div">
+                            {metric.value} {metric.unit}
+                          </Typography>
+                        </CardContent>
+                      </Card>
+                    </Grid>
+                  ))
+                ) : (
+                  <Grid item xs={12}>
+                    <Alert severity="info">No financial metrics available.</Alert>
                   </Grid>
-                ))}
+                )}
               </Grid>
             </TabPanel>
             
@@ -167,13 +275,17 @@ export default function ReportDetails({ params }: { params: { id: string } }) {
               <Typography variant="h6" gutterBottom>
                 Risk Factors
               </Typography>
-              <List>
-                {sampleReport.risks.map((risk, index) => (
-                  <ListItem key={index}>
-                    <ListItemText primary={risk} />
-                  </ListItem>
-                ))}
-              </List>
+              {reportData.summaries?.risks ? (
+                <Typography variant="body1" component="div">
+                  {reportData.summaries.risks.split('\n').map((risk: string, index: number) => (
+                    <Box key={index} sx={{ mb: 1 }}>
+                      {risk}
+                    </Box>
+                  ))}
+                </Typography>
+              ) : (
+                <Alert severity="info">No risk factors available.</Alert>
+              )}
               
               <Divider sx={{ my: 2 }} />
               
@@ -181,7 +293,7 @@ export default function ReportDetails({ params }: { params: { id: string } }) {
                 Business Outlook
               </Typography>
               <Typography variant="body1" paragraph>
-                {sampleReport.outlook}
+                {reportData.summaries?.outlook || "No business outlook available."}
               </Typography>
             </TabPanel>
           </Paper>
@@ -193,49 +305,52 @@ export default function ReportDetails({ params }: { params: { id: string } }) {
             <Typography variant="h6" gutterBottom>
               Key Metrics
             </Typography>
-            <List dense>
-              {sampleReport.keyMetrics.map((metric, index) => (
-                <React.Fragment key={index}>
-                  <ListItem>
-                    <ListItemText 
-                      primary={metric.name} 
-                      secondary={metric.value} 
-                      primaryTypographyProps={{ variant: 'subtitle2' }}
-                      secondaryTypographyProps={{ variant: 'h6', color: 'primary' }}
-                    />
-                  </ListItem>
-                  {index < sampleReport.keyMetrics.length - 1 && <Divider component="li" />}
-                </React.Fragment>
-              ))}
-            </List>
+            {keyMetrics.length > 0 ? (
+              <List dense>
+                {keyMetrics.map((metric: any, index: number) => (
+                  <React.Fragment key={index}>
+                    <ListItem>
+                      <ListItemText 
+                        primary={metric.name} 
+                        secondary={`${metric.value} ${metric.unit}`} 
+                        primaryTypographyProps={{ variant: 'subtitle2' }}
+                        secondaryTypographyProps={{ variant: 'h6', color: 'primary' }}
+                      />
+                    </ListItem>
+                    {index < keyMetrics.length - 1 && <Divider component="li" />}
+                  </React.Fragment>
+                ))}
+              </List>
+            ) : (
+              <Alert severity="info">No key metrics available.</Alert>
+            )}
           </Paper>
           
           <Paper sx={{ p: 3 }}>
             <Typography variant="h6" gutterBottom>
               Related Reports
             </Typography>
-            <List dense>
-              <ListItem button component="a" href="#">
-                <ListItemText 
-                  primary="Apple Inc. - 2022" 
-                  secondary="Previous Year" 
-                />
-              </ListItem>
-              <Divider component="li" />
-              <ListItem button component="a" href="#">
-                <ListItemText 
-                  primary="Microsoft Corporation - 2023" 
-                  secondary="Same Sector" 
-                />
-              </ListItem>
-              <Divider component="li" />
-              <ListItem button component="a" href="#">
-                <ListItemText 
-                  primary="Alphabet Inc. - 2023" 
-                  secondary="Same Sector" 
-                />
-              </ListItem>
-            </List>
+            {relatedReports.length > 0 ? (
+              <List dense>
+                {relatedReports.slice(0, 5).map((report: any, index: number) => (
+                  <React.Fragment key={report.id}>
+                    <ListItem 
+                      button 
+                      component="a" 
+                      href={`/reports/${report.id}`}
+                    >
+                      <ListItemText 
+                        primary={`${report.company_name} - ${report.year}`} 
+                        secondary={report.processing_status} 
+                      />
+                    </ListItem>
+                    {index < relatedReports.length - 1 && index < 4 && <Divider component="li" />}
+                  </React.Fragment>
+                ))}
+              </List>
+            ) : (
+              <Alert severity="info">No related reports available.</Alert>
+            )}
           </Paper>
         </Grid>
       </Grid>
