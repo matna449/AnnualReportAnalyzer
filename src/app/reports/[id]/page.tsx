@@ -110,17 +110,27 @@ export default function ReportDetails({ params }: { params: { id: string } }) {
     csvContent += `Year,${reportData.year}\n`;
     csvContent += `Upload Date,${reportData.upload_date}\n\n`;
     
-    // Add metrics
+    // Add metrics - safely handle if metrics is undefined
     csvContent += "Metric Name,Value,Unit\n";
-    reportData.metrics.forEach((metric: any) => {
-      csvContent += `${metric.name},${metric.value},${metric.unit}\n`;
-    });
+    if (reportData.metrics && Array.isArray(reportData.metrics)) {
+      reportData.metrics.forEach((metric: any) => {
+        csvContent += `${metric.name},${metric.value},${metric.unit}\n`;
+      });
+    } else {
+      csvContent += "No metrics available,,\n";
+    }
     
-    // Add summaries
+    // Add summaries - safely handle if summaries is undefined
     csvContent += "\nSummaries\n";
-    Object.entries(reportData.summaries).forEach(([key, value]: [string, any]) => {
-      csvContent += `${key},${value.replace(/,/g, ';').replace(/\n/g, ' ')}\n`;
-    });
+    if (reportData.summaries && typeof reportData.summaries === 'object') {
+      Object.entries(reportData.summaries).forEach(([key, value]: [string, any]) => {
+        if (value) {
+          csvContent += `${key},${value.replace(/,/g, ';').replace(/\n/g, ' ')}\n`;
+        }
+      });
+    } else {
+      csvContent += "No summaries available,\n";
+    }
     
     // Create download link
     const encodedUri = encodeURI(csvContent);
@@ -167,18 +177,22 @@ export default function ReportDetails({ params }: { params: { id: string } }) {
     );
   }
 
-  // Format metrics for display
-  const financialMetrics = reportData.metrics.filter((m: any) => 
-    ['revenue', 'income', 'profit', 'eps', 'ebitda', 'assets', 'liabilities', 'equity', 'cash'].some(
-      term => m.name.toLowerCase().includes(term)
-    )
-  );
+  // Format metrics for display - safely handle if metrics is undefined
+  const financialMetrics = reportData.metrics && Array.isArray(reportData.metrics) 
+    ? reportData.metrics.filter((m: any) => 
+        ['revenue', 'income', 'profit', 'eps', 'ebitda', 'assets', 'liabilities', 'equity', 'cash'].some(
+          term => m.name.toLowerCase().includes(term)
+        )
+      )
+    : [];
 
-  const keyMetrics = reportData.metrics.filter((m: any) => 
-    ['margin', 'growth', 'ratio', 'return', 'roi', 'roe', 'roa'].some(
-      term => m.name.toLowerCase().includes(term)
-    )
-  );
+  const keyMetrics = reportData.metrics && Array.isArray(reportData.metrics)
+    ? reportData.metrics.filter((m: any) => 
+        ['margin', 'growth', 'ratio', 'return', 'roi', 'roe', 'roa'].some(
+          term => m.name.toLowerCase().includes(term)
+        )
+      )
+    : [];
 
   return (
     <PageLayout>
