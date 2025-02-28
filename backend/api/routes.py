@@ -11,6 +11,7 @@ from models.schemas import (
     Report, SearchParams, ComparisonRequest
 )
 from services.analysis_service import AnalysisService
+from services.db_service import DBService  # Consistent import path
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -53,16 +54,13 @@ async def update_company(
 ):
     """Update a company."""
     try:
-        from backend.services.db_service import DBService
         updated_company = DBService.update_company(db, company_id, company)
-        if not updated_company:
-            raise HTTPException(status_code=404, detail=f"Company with ID {company_id} not found")
+        if updated_company is None:
+            raise HTTPException(status_code=404, detail="Company not found")
         return updated_company
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error updating company: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error updating company: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 # Report routes
 @router.post("/reports/upload")
@@ -192,27 +190,26 @@ async def get_company_reports(
     limit: int = 100,
     db: Session = Depends(get_db)
 ):
-    """Get all reports for a specific company."""
+    """Get reports for a specific company."""
     try:
-        from backend.services.db_service import DBService
         company = DBService.get_company(db, company_id)
-        if not company:
-            raise HTTPException(status_code=404, detail=f"Company with ID {company_id} not found")
+        if company is None:
+            raise HTTPException(status_code=404, detail="Company not found")
         
         reports = DBService.get_reports_by_company(db, company_id, skip, limit)
         
-        # Convert SQLAlchemy objects to dictionaries
+        # Format the response
         result = []
         for report in reports:
             result.append({
                 "id": report.id,
-                "company_id": report.company_id,
-                "company_name": company.name,
                 "year": report.year,
-                "file_name": report.file_name,
+                "file_path": report.file_path,
                 "upload_date": report.upload_date,
                 "processing_status": report.processing_status,
-                "page_count": report.page_count
+                "company_id": report.company_id,
+                "company_name": company.name,
+                "company_ticker": company.ticker
             })
         
         return result
@@ -220,7 +217,7 @@ async def get_company_reports(
         raise
     except Exception as e:
         logger.error(f"Error getting company reports: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting company reports: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.post("/reports/search/", response_model=Dict[str, List])
 async def search_reports(
@@ -296,7 +293,7 @@ async def get_dashboard_summary(
         }
     except Exception as e:
         logger.error(f"Error getting dashboard summary: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting dashboard summary: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/dashboard/recent-reports", response_model=List[Dict[str, Any]])
 async def get_recent_reports(
@@ -324,9 +321,8 @@ async def get_recent_reports(
 async def get_sector_distribution(
     db: Session = Depends(get_db)
 ):
-    """Get the distribution of companies by sector for the dashboard."""
+    """Get distribution of companies by sector."""
     try:
-        from backend.services.db_service import DBService
         companies = DBService.get_companies(db)
         
         # Count companies by sector
@@ -337,7 +333,7 @@ async def get_sector_distribution(
                 sector_counts[sector] = 0
             sector_counts[sector] += 1
         
-        # Convert to list format for frontend
+        # Format the response
         result = [
             {"sector": sector, "count": count}
             for sector, count in sector_counts.items()
@@ -346,4 +342,4 @@ async def get_sector_distribution(
         return result
     except Exception as e:
         logger.error(f"Error getting sector distribution: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting sector distribution: {str(e)}") 
+        raise HTTPException(status_code=500, detail="Internal server error") 

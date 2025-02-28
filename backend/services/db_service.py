@@ -306,12 +306,12 @@ class DBService:
     
     @staticmethod
     def get_report_with_company(db: Session, report_id: int) -> Optional[Report]:
-        """Get a report by ID with its associated company."""
+        """Get a report with its associated company."""
         try:
-            return db.query(Report).filter(Report.id == report_id).join(Report.company).first()
+            return db.query(Report).filter(Report.id == report_id).first()
         except Exception as e:
             logger.error(f"Error getting report with company: {str(e)}")
-            raise
+            return None
     
     @staticmethod
     def get_report_full_data(db: Session, report_id: int) -> Dict[str, Any]:
@@ -372,4 +372,31 @@ class DBService:
             ]
         except Exception as e:
             logger.error(f"Error getting metrics by name and company: {str(e)}")
-            raise 
+            raise
+    
+    @staticmethod
+    def get_company_count(db: Session) -> int:
+        """Get the total number of companies in the database."""
+        try:
+            return db.query(Company).count()
+        except Exception as e:
+            logger.error(f"Error getting company count: {str(e)}")
+            return 0
+    
+    @staticmethod
+    def get_report_count(db: Session) -> int:
+        """Get the total number of reports in the database."""
+        try:
+            return db.query(Report).count()
+        except Exception as e:
+            logger.error(f"Error getting report count: {str(e)}")
+            return 0
+    
+    @staticmethod
+    def get_recent_reports(db: Session, limit: int = 5) -> List[Report]:
+        """Get the most recently uploaded reports."""
+        try:
+            return db.query(Report).order_by(desc(Report.upload_date)).limit(limit).all()
+        except Exception as e:
+            logger.error(f"Error getting recent reports: {str(e)}")
+            return [] 
