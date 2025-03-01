@@ -12,10 +12,14 @@ from models.schemas import (
 )
 from services.analysis_service import AnalysisService
 from services.db_service import DBService  # Consistent import path
+from api.pdf_processing_routes import router as pdf_router
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 analysis_service = AnalysisService()
+
+# Include PDF processing routes
+router.include_router(pdf_router)
 
 # Company routes
 @router.post("/companies/", response_model=Company)

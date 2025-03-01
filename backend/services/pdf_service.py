@@ -5,6 +5,9 @@ import pdfplumber
 import re
 from typing import List, Dict, Any, Tuple
 from utils.helpers import sanitize_filename
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from sqlalchemy.orm import Session
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -200,4 +203,4 @@ class PDFService:
                     logger.info(f"Cleaned up partial file: {file_path}")
                 except Exception as cleanup_error:
                     logger.error(f"Failed to clean up partial file: {str(cleanup_error)}")
-            raise 
+            raise

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Typography, 
   Box, 
@@ -23,33 +23,15 @@ import {
 import Link from 'next/link';
 import PageLayout from '@/components/PageLayout';
 
-// Sample data for recently analyzed reports
-const recentReports = [
-  { 
-    id: 1, 
-    company: 'Apple Inc.', 
-    ticker: 'AAPL', 
-    year: '2023',
-    status: 'Completed',
-    date: 'Feb 26, 2024'
-  },
-  { 
-    id: 2, 
-    company: 'Microsoft Corporation', 
-    ticker: 'MSFT', 
-    year: '2023',
-    status: 'Completed',
-    date: 'Feb 25, 2024'
-  },
-  { 
-    id: 3, 
-    company: 'Tesla, Inc.', 
-    ticker: 'TSLA', 
-    year: '2022',
-    status: 'Processing',
-    date: 'Feb 24, 2024'
-  }
-];
+// Define report type
+interface Report {
+  id: number;
+  company: string;
+  ticker: string;
+  year: string;
+  status: string;
+  date: string;
+}
 
 export default function Home() {
   const [companyName, setCompanyName] = useState('');
@@ -58,6 +40,48 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [recentReports, setRecentReports] = useState<Report[]>([]);
+  const [loadingReports, setLoadingReports] = useState(true);
+
+  // Fetch recent reports on component mount
+  useEffect(() => {
+    fetchRecentReports();
+  }, []);
+
+  const fetchRecentReports = async () => {
+    try {
+      setLoadingReports(true);
+      const response = await fetch('/api/reports/recent');
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch recent reports');
+      }
+      
+      const data = await response.json();
+      
+      // Transform the data to match our Report interface
+      const reports: Report[] = data.reports.map((report: any) => ({
+        id: report.id,
+        company: report.company_name,
+        ticker: report.ticker || 'N/A',
+        year: report.year,
+        status: report.processing_status,
+        date: new Date(report.upload_date).toLocaleDateString('en-US', {
+          month: 'short',
+          day: 'numeric',
+          year: 'numeric'
+        })
+      }));
+      
+      setRecentReports(reports);
+    } catch (error) {
+      console.error('Error fetching recent reports:', error);
+      // If we can't fetch reports, use empty array
+      setRecentReports([]);
+    } finally {
+      setLoadingReports(false);
+    }
+  };
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (event.target.files && event.target.files[0]) {
@@ -98,43 +122,25 @@ export default function Home() {
       
       // Check if the response is ok before trying to parse JSON
       if (!response.ok) {
-        // Check content type to handle different error formats
-        const contentType = response.headers.get('content-type');
-        
-        if (contentType && contentType.includes('application/json')) {
-          // If it's JSON, parse the error details
-          const errorData = await response.json();
-          throw new Error(errorData.detail || 'Failed to upload report');
-        } else {
-          // If it's not JSON, use the status text
-          throw new Error(`Upload failed: ${response.status} ${response.statusText}`);
-        }
+        const errorText = await response.text();
+        console.error('Error response body:', errorText);
+        throw new Error(`Upload failed: ${response.status} ${response.statusText}`);
       }
       
-      // Check content type before parsing JSON
-      const contentType = response.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        throw new Error('Server returned an unexpected response format');
-      }
-      
-      // Now safely parse the JSON response
       const data = await response.json();
-      console.log('Upload successful:', data);
+      console.log('Response data:', data);
       
-      // Reset form
+      setSuccess(true);
       setCompanyName('');
       setReportYear('');
       setSelectedFile(null);
-      setSuccess(true);
       
-      // Reload the page after 2 seconds to show the new report
-      setTimeout(() => {
-        window.location.reload();
-      }, 2000);
+      // Refresh the recent reports list
+      fetchRecentReports();
       
-    } catch (err) {
-      console.error('Upload error:', err);
-      setError(err instanceof Error ? err.message : 'An unknown error occurred');
+    } catch (error) {
+      console.error('Error uploading file:', error);
+      setError(error instanceof Error ? error.message : 'An unknown error occurred');
     } finally {
       setLoading(false);
     }
@@ -145,209 +151,158 @@ export default function Home() {
     setError(null);
   };
 
+  // Function to get status chip color
+  const getStatusColor = (status: string) => {
+    switch (status.toLowerCase()) {
+      case 'completed':
+        return 'success';
+      case 'processing':
+        return 'warning';
+      case 'pending':
+        return 'info';
+      case 'failed':
+        return 'error';
+      default:
+        return 'default';
+    }
+  };
+
   return (
     <PageLayout>
-      <Box sx={{ textAlign: 'center', mb: 6 }}>
-        <Typography variant="h3" component="h1" gutterBottom>
+      <Box sx={{ py: 4 }}>
+        <Typography variant="h4" component="h1" gutterBottom>
           Annual Report Analyzer
         </Typography>
-        <Typography variant="h6" color="text.secondary">
-          Upload company annual reports and get AI-powered insights, financial metrics,
-          and business outlook analysis.
+        <Typography variant="subtitle1" color="text.secondary" paragraph>
+          Upload an annual report PDF to extract financial data and generate insights
         </Typography>
-      </Box>
-
-      <Grid container spacing={4}>
-        {/* Upload Section */}
-        <Grid item xs={12} md={6}>
-          <Paper sx={{ p: 4 }}>
-            <Typography variant="h5" component="h2" gutterBottom>
-              Upload Report
-            </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-              Upload a company annual report in PDF format
-            </Typography>
-            
-            <Box component="form" sx={{ mb: 3 }} encType="multipart/form-data">
+        
+        <Paper sx={{ p: 3, mb: 4 }}>
+          <Typography variant="h6" gutterBottom>
+            Upload Annual Report
+          </Typography>
+          <Grid container spacing={2}>
+            <Grid item xs={12} sm={4}>
               <TextField
                 fullWidth
                 label="Company Name"
-                variant="outlined"
-                placeholder="e.g. Apple Inc."
                 value={companyName}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCompanyName(e.target.value)}
-                sx={{ mb: 2 }}
+                onChange={(e) => setCompanyName(e.target.value)}
+                margin="normal"
+                variant="outlined"
               />
-              
+            </Grid>
+            <Grid item xs={12} sm={4}>
               <TextField
                 fullWidth
                 label="Report Year"
-                variant="outlined"
-                placeholder="e.g. 2023"
                 value={reportYear}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReportYear(e.target.value)}
-                sx={{ mb: 3 }}
+                onChange={(e) => setReportYear(e.target.value)}
+                margin="normal"
+                variant="outlined"
               />
-              
-              <Box 
-                sx={{ 
-                  border: '2px dashed #ccc', 
-                  borderRadius: 2, 
-                  p: 3, 
-                  textAlign: 'center',
-                  mb: 3,
-                  cursor: 'pointer',
-                  '&:hover': {
-                    borderColor: 'primary.main',
-                  }
-                }}
-                onClick={() => document.getElementById('file-upload')?.click()}
-              >
+            </Grid>
+            <Grid item xs={12} sm={4}>
+              <Box sx={{ mt: 3 }}>
                 <input
-                  type="file"
-                  id="file-upload"
-                  accept=".pdf"
+                  accept="application/pdf"
                   style={{ display: 'none' }}
+                  id="raised-button-file"
+                  type="file"
                   onChange={handleFileChange}
                 />
-                <CloudUploadIcon fontSize="large" color="primary" />
-                <Typography variant="body1" sx={{ mt: 1 }}>
-                  {selectedFile ? selectedFile.name : 'Click to upload or drag and drop'}
-                </Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                  PDF (MAX. 50MB)
-                </Typography>
+                <label htmlFor="raised-button-file">
+                  <Button
+                    variant="outlined"
+                    component="span"
+                    startIcon={<CloudUploadIcon />}
+                    sx={{ mr: 2 }}
+                  >
+                    Select PDF
+                  </Button>
+                </label>
+                {selectedFile && (
+                  <Typography variant="body2" component="span">
+                    {selectedFile.name}
+                  </Typography>
+                )}
               </Box>
-              
-              <Button 
-                variant="contained" 
-                fullWidth 
-                size="large"
-                startIcon={loading ? <CircularProgress size={24} color="inherit" /> : <CloudUploadIcon />}
+            </Grid>
+            <Grid item xs={12}>
+              <Button
+                variant="contained"
+                color="primary"
                 onClick={handleUpload}
                 disabled={!selectedFile || !companyName || !reportYear || loading}
+                startIcon={loading ? <CircularProgress size={24} color="inherit" /> : <FileIcon />}
               >
                 {loading ? 'Uploading...' : 'Upload and Analyze'}
               </Button>
-            </Box>
-          </Paper>
-        </Grid>
-        
-        {/* Navigation and Recent Reports */}
-        <Grid item xs={12} md={6}>
-          <Grid container spacing={3}>
-            <Grid item xs={12}>
-              <Paper sx={{ p: 4 }}>
-                <Typography variant="h5" component="h2" gutterBottom>
-                  Dashboard
-                </Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-                  View analyzed reports and key metrics
-                </Typography>
-                
-                <Box sx={{ display: 'flex', justifyContent: 'center' }}>
-                  <Button 
-                    variant="contained" 
-                    component={Link} 
-                    href="/dashboard"
-                    size="large"
-                    fullWidth
-                    sx={{ maxWidth: 300 }}
-                  >
-                    View Dashboard
-                  </Button>
-                </Box>
-              </Paper>
-            </Grid>
-            
-            <Grid item xs={12}>
-              <Paper sx={{ p: 4 }}>
-                <Typography variant="h5" component="h2" gutterBottom>
-                  Search Reports
-                </Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-                  Find and compare company reports
-                </Typography>
-                
-                <Box sx={{ display: 'flex', justifyContent: 'center' }}>
-                  <Button 
-                    variant="outlined" 
-                    component={Link} 
-                    href="/search"
-                    size="large"
-                    fullWidth
-                    sx={{ maxWidth: 300 }}
-                  >
-                    Search Reports
-                  </Button>
-                </Box>
-              </Paper>
             </Grid>
           </Grid>
-        </Grid>
+        </Paper>
         
-        {/* Recently Analyzed Reports */}
-        <Grid item xs={12}>
-          <Typography variant="h5" component="h2" gutterBottom>
-            Recently Analyzed Reports
-          </Typography>
-          
-          <Grid container spacing={3}>
+        <Typography variant="h6" gutterBottom>
+          Recently Analyzed Reports
+        </Typography>
+        
+        {loadingReports ? (
+          <Box sx={{ display: 'flex', justifyContent: 'center', my: 4 }}>
+            <CircularProgress />
+          </Box>
+        ) : recentReports.length > 0 ? (
+          <Grid container spacing={2}>
             {recentReports.map((report) => (
               <Grid item xs={12} sm={6} md={4} key={report.id}>
                 <Card>
                   <CardContent>
-                    <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-                      <FileIcon color="primary" sx={{ mr: 1 }} />
-                      <Typography variant="h6" component="div">
-                        {report.company}
-                      </Typography>
-                    </Box>
-                    
-                    <Typography color="text.secondary" gutterBottom>
-                      Annual Report {report.year}
+                    <Typography variant="h6" component="div">
+                      {report.company}
                     </Typography>
-                    
-                    <Divider sx={{ my: 1.5 }} />
-                    
+                    <Typography color="text.secondary" gutterBottom>
+                      {report.ticker} | {report.year}
+                    </Typography>
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2 }}>
                       <Chip 
                         label={report.status} 
-                        color={report.status === 'Completed' ? 'success' : 'warning'} 
+                        color={getStatusColor(report.status) as any}
                         size="small" 
                       />
                       <Typography variant="body2" color="text.secondary">
                         {report.date}
                       </Typography>
                     </Box>
-                    
-                    <Box sx={{ mt: 2 }}>
-                      <Button 
-                        variant="outlined" 
-                        size="small" 
-                        component={Link}
-                        href={`/reports/${report.id}`}
-                        fullWidth
-                      >
-                        View Analysis
-                      </Button>
+                    <Divider sx={{ my: 2 }} />
+                    <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
+                      <Link href={`/reports/${report.id}`} passHref>
+                        <Button size="small" color="primary">
+                          View Analysis
+                        </Button>
+                      </Link>
                     </Box>
                   </CardContent>
                 </Card>
               </Grid>
             ))}
           </Grid>
-        </Grid>
-      </Grid>
-
-      {/* Snackbar for success or error messages */}
-      <Snackbar
-        open={success || error}
-        autoHideDuration={6000}
-        onClose={handleCloseSnackbar}
-      >
-        <Alert onClose={handleCloseSnackbar} severity={success ? "success" : "error"}>
-          {success ? 'Report uploaded successfully!' : error}
+        ) : (
+          <Paper sx={{ p: 3, textAlign: 'center' }}>
+            <Typography variant="body1" color="text.secondary">
+              No reports have been analyzed yet. Upload an annual report to get started.
+            </Typography>
+          </Paper>
+        )}
+      </Box>
+      
+      <Snackbar open={!!error} autoHideDuration={6000} onClose={handleCloseSnackbar}>
+        <Alert onClose={handleCloseSnackbar} severity="error" sx={{ width: '100%' }}>
+          {error}
+        </Alert>
+      </Snackbar>
+      
+      <Snackbar open={success} autoHideDuration={6000} onClose={handleCloseSnackbar}>
+        <Alert onClose={handleCloseSnackbar} severity="success" sx={{ width: '100%' }}>
+          Report uploaded successfully! Analysis is in progress.
         </Alert>
       </Snackbar>
     </PageLayout>

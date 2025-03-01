@@ -1,0 +1,39 @@
+I need to implement a selective processing strategy for extracting and analyzing financial data from annual reports (400-500 pages) in PDF format.
+
+Please create a Python script that:
+
+1. Takes a PDF path as input
+2. Performs a first pass to identify page numbers of likely financial sections by:
+   - Looking for table of contents/index pages
+   - Scanning for section headings that indicate financial data (e.g., "Financial Statements", "Consolidated Financial Statements", "Balance Sheet", "Income Statement", "Cash Flow Statement", "Notes to Financial Statements")
+   - Using regex patterns to detect page numbers associated with these sections
+
+3. Selectively extracts only the identified financial sections
+4. Processes tables and structured data from these sections
+5. Calculates important financial KPIs not explicitly stated in the report
+6. Uses Hugging Face's API to generate AI-powered summaries and insights from the extracted financial data
+7. Stores the extracted data and analysis in annual_reports.db for frontend display in the "Recently Analyzed Reports" section
+
+Key KPIs to calculate and include in the analysis:
+- Profitability metrics: Return on Equity (ROE), Return on Assets (ROA), Net Profit Margin
+- Liquidity metrics: Current Ratio, Quick Ratio, Working Capital
+- Efficiency metrics: Asset Turnover, Inventory Turnover
+- Solvency metrics: Debt-to-Equity Ratio, Interest Coverage Ratio
+- Valuation metrics: P/E Ratio, EV/EBITDA
+- Growth metrics: Year-over-year revenue growth, Net income growth
+- Cash flow metrics: Free Cash Flow, Operating Cash Flow Ratio
+
+For the Hugging Face API integration:
+- Implement API calls to a financial text generation model (e.g., gpt2-finetuned-finance or a similar specialized model)
+- Structure the prompt to include key financial data points and KPIs
+- Request the model to generate insights about financial health, trends, and potential red flags
+- Include comparisons with previous periods when available
+- Keep summaries concise but comprehensive
+
+The solution should:
+- Use PyPDF2 or pdfplumber for text extraction and tabula-py for handling tables
+- Be memory-efficient to handle very large PDF files without loading the entire document at once
+- Store all extracted data, KPIs, and AI-generated summaries in the annual_reports.db database
+- Replace the hardcoded examples (Apple, Microsoft, Tesla) in the "Recently Analyzed Reports" section of the frontend with actual entries from the database
+
+Include code for the data extraction pipeline, KPI calculations, Hugging Face API integration, and database integration with the frontend.
