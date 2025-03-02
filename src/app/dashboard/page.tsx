@@ -34,6 +34,7 @@ export default function Dashboard() {
   const [selectedCompany, setSelectedCompany] = useState<number | null>(null);
   const [companyMetrics, setCompanyMetrics] = useState<any[]>([]);
   const [metricType, setMetricType] = useState<string>('revenue');
+  const [tabValue, setTabValue] = useState<string>('executive');
 
   useEffect(() => {
     const fetchDashboardData = async () => {
@@ -268,6 +269,107 @@ export default function Dashboard() {
               colors={['#8884d8']}
             />
           </Paper>
+          
+          {/* Latest Summaries Section */}
+          {dashboardData?.latest_summaries && Object.keys(dashboardData.latest_summaries).length > 0 && (
+            <Paper sx={{ p: 2, mb: 3 }}>
+              <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
+                <DescriptionIcon sx={{ mr: 1, color: 'primary.main' }} />
+                Latest Report Insights
+              </Typography>
+              
+              <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}>
+                <Tabs 
+                  value={tabValue || 'executive'} 
+                  onChange={(e, newValue) => setTabValue(newValue)}
+                  variant="scrollable"
+                  scrollButtons="auto"
+                  textColor="primary"
+                  indicatorColor="primary"
+                >
+                  {dashboardData.latest_summaries.executive && (
+                    <Tab label="Executive Summary" value="executive" />
+                  )}
+                  {dashboardData.latest_summaries.risks && (
+                    <Tab label="Risk Factors" value="risks" />
+                  )}
+                  {dashboardData.latest_summaries.outlook && (
+                    <Tab label="Business Outlook" value="outlook" />
+                  )}
+                  {dashboardData.latest_summaries.sentiment && (
+                    <Tab label="Sentiment" value="sentiment" />
+                  )}
+                </Tabs>
+              </Box>
+              
+              <Box sx={{ p: 2, minHeight: '200px', maxHeight: '300px', overflowY: 'auto' }}>
+                {tabValue === 'executive' && dashboardData.latest_summaries.executive && (
+                  <Paper elevation={0} sx={{ p: 2, bgcolor: 'background.paper', borderRadius: 2 }}>
+                    <Typography variant="body1" sx={{ lineHeight: 1.7, textAlign: 'justify' }}>
+                      {dashboardData.latest_summaries.executive}
+                    </Typography>
+                  </Paper>
+                )}
+                {tabValue === 'risks' && dashboardData.latest_summaries.risks && (
+                  <Box component="div">
+                    {dashboardData.latest_summaries.risks.split('\n').map((risk, index) => (
+                      <Paper 
+                        key={index} 
+                        elevation={0}
+                        sx={{ 
+                          p: 2, 
+                          mb: 2, 
+                          bgcolor: 'error.light', 
+                          color: 'error.dark',
+                          borderRadius: 1
+                        }}
+                      >
+                        <Typography variant="body1">
+                          {risk}
+                        </Typography>
+                      </Paper>
+                    ))}
+                  </Box>
+                )}
+                {tabValue === 'outlook' && dashboardData.latest_summaries.outlook && (
+                  <Paper 
+                    elevation={0} 
+                    sx={{ 
+                      p: 2, 
+                      bgcolor: 'info.light', 
+                      color: 'info.dark',
+                      borderRadius: 2 
+                    }}
+                  >
+                    <Typography variant="body1" sx={{ lineHeight: 1.7, textAlign: 'justify' }}>
+                      {dashboardData.latest_summaries.outlook}
+                    </Typography>
+                  </Paper>
+                )}
+                {tabValue === 'sentiment' && dashboardData.latest_summaries.sentiment && (
+                  <Paper 
+                    elevation={0} 
+                    sx={{ 
+                      p: 2, 
+                      bgcolor: dashboardData.latest_summaries.sentiment.includes('positive') ? 'success.light' : 
+                              dashboardData.latest_summaries.sentiment.includes('negative') ? 'error.light' : 'info.light',
+                      color: dashboardData.latest_summaries.sentiment.includes('positive') ? 'success.dark' : 
+                             dashboardData.latest_summaries.sentiment.includes('negative') ? 'error.dark' : 'info.dark',
+                      borderRadius: 2
+                    }}
+                  >
+                    <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
+                      {dashboardData.latest_summaries.sentiment.includes('positive') ? '😀 Positive' : 
+                       dashboardData.latest_summaries.sentiment.includes('negative') ? '😟 Negative' : '😐 Neutral'}
+                    </Typography>
+                    <Typography variant="body1" sx={{ lineHeight: 1.7 }}>
+                      {dashboardData.latest_summaries.sentiment}
+                    </Typography>
+                  </Paper>
+                )}
+              </Box>
+            </Paper>
+          )}
           
           {companies.length > 0 && (
             <Paper sx={{ p: 2 }}>

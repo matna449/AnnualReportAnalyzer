@@ -237,9 +237,123 @@ async def compare_reports(
     comparison_request: ComparisonRequest,
     db: Session = Depends(get_db)
 ):
-    """Compare metrics between multiple reports."""
-    result = DBService.compare_reports(db, comparison_request)
-    return result
+    """Compare metrics and summaries between multiple reports."""
+    try:
+        # Validate report IDs
+        report_ids = comparison_request.report_ids
+        if len(report_ids) < 2:
+            raise HTTPException(status_code=400, detail="At least two reports are required for comparison")
+        
+        # Get reports data
+        reports_data = []
+        for report_id in report_ids:
+            report = DBService.get_report(db, report_id)
+            if not report:
+                raise HTTPException(status_code=404, detail=f"Report with ID {report_id} not found")
+            reports_data.append(report)
+        
+        # Get metrics for comparison
+        metrics_comparison = {}
+        for report in reports_data:
+            metrics = db.query(Metric).filter(Metric.report_id == report.id).all()
+            
+            # Filter metrics if specified
+            if comparison_request.metrics:
+                metrics = [m for m in metrics if m.name in comparison_request.metrics]
+            
+            # Organize metrics by name
+            for metric in metrics:
+                if metric.name not in metrics_comparison:
+                    metrics_comparison[metric.name] = {}
+                
+                metrics_comparison[metric.name][report.id] = {
+                    "value": metric.value,
+                    "unit": metric.unit,
+                    "year": report.year,
+                    "company_name": report.company.name if report.company else "Unknown"
+                }
+        
+        # Get summaries for comparison
+        summaries_comparison = {}
+        for report in reports_data:
+            summaries = DBService.get_summaries_by_report(db, report.id)
+            
+            # Organize summaries by category
+            report_summaries = {}
+            for summary in summaries:
+                report_summaries[summary.category] = summary.content
+            
+            summaries_comparison[report.id] = {
+                "summaries": report_summaries,
+                "year": report.year,
+                "company_name": report.company.name if report.company else "Unknown"
+            }
+        
+        # Generate AI comparison analysis if available
+        comparison_analysis = {}
+        try:
+            # Get the summaries for each report
+            report1_summaries = summaries_comparison[report_ids[0]]["summaries"]
+            report2_summaries = summaries_comparison[report_ids[1]]["summaries"]
+            
+            # Compare executive summaries
+            if "executive" in report1_summaries and "executive" in report2_summaries:
+                comparison_analysis["executive"] = await analysis_service.compare_texts(
+                    report1_summaries["executive"],
+                    report2_summaries["executive"],
+                    "Compare these two executive summaries and highlight key differences and similarities:"
+                )
+            
+            # Compare risk factors
+            if "risks" in report1_summaries and "risks" in report2_summaries:
+                comparison_analysis["risks"] = await analysis_service.compare_texts(
+                    report1_summaries["risks"],
+                    report2_summaries["risks"],
+                    "Compare these two risk assessments and identify which report presents higher risks:"
+                )
+            
+            # Compare business outlook
+            if "outlook" in report1_summaries and "outlook" in report2_summaries:
+                comparison_analysis["outlook"] = await analysis_service.compare_texts(
+                    report1_summaries["outlook"],
+                    report2_summaries["outlook"],
+                    "Compare these two business outlooks and determine which is more optimistic:"
+                )
+            
+            # Compare sentiment
+            if "sentiment" in report1_summaries and "sentiment" in report2_summaries:
+                comparison_analysis["sentiment"] = await analysis_service.compare_texts(
+                    report1_summaries["sentiment"],
+                    report2_summaries["sentiment"],
+                    "Compare these two sentiment analyses and determine which report has a more positive tone:"
+                )
+        except Exception as e:
+            logger.warning(f"Error generating AI comparison: {str(e)}")
+            comparison_analysis = {"error": str(e)}
+        
+        # Format the response
+        result = {
+            "reports": [
+                {
+                    "id": report.id,
+                    "company_id": report.company_id,
+                    "company_name": report.company.name if report.company else "Unknown",
+                    "year": report.year,
+                    "file_name": report.file_name
+                }
+                for report in reports_data
+            ],
+            "metrics_comparison": metrics_comparison,
+            "summaries_comparison": summaries_comparison,
+            "ai_analysis": comparison_analysis
+        }
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error comparing reports: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error comparing reports: {str(e)}")
 
 @router.get("/companies/{company_id}/metrics", response_model=Dict[str, List])
 async def get_company_metrics(
@@ -269,8 +383,13 @@ async def get_dashboard_summary(
         
         # Get latest upload date
         latest_upload_date = None
+        latest_report_id = None
         if report_count > 0:
-            latest_upload_date = max(report.upload_date for report in DBService.get_reports(db))
+            recent_reports = DBService.get_recent_reports(db, limit=1)
+            if recent_reports:
+                latest_report = recent_reports[0]
+                latest_upload_date = latest_report.upload_date
+                latest_report_id = latest_report.id
         
         # Get reports by status
         status_counts = {}
@@ -288,12 +407,20 @@ async def get_dashboard_summary(
                 year_counts[year] = 0
             year_counts[year] += 1
         
+        # Get latest summaries if available
+        latest_summaries = {}
+        if latest_report_id:
+            summaries = DBService.get_summaries_by_report(db, latest_report_id)
+            for summary in summaries:
+                latest_summaries[summary.category] = summary.content
+        
         return {
             "company_count": company_count,
             "report_count": report_count,
             "latest_upload_date": latest_upload_date,
             "status_counts": status_counts,
-            "year_counts": year_counts
+            "year_counts": year_counts,
+            "latest_summaries": latest_summaries
         }
     except Exception as e:
         logger.error(f"Error getting dashboard summary: {str(e)}")
@@ -346,4 +473,23 @@ async def get_sector_distribution(
         return result
     except Exception as e:
         logger.error(f"Error getting sector distribution: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error") 
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@router.get("/reports/{report_id}/summaries", response_model=Dict[str, str])
+async def get_report_summaries(
+    report_id: int,
+    db: Session = Depends(get_db)
+):
+    """Get all summaries for a specific report, organized by category."""
+    try:
+        summaries = DBService.get_summaries_by_report(db, report_id)
+        
+        # Organize summaries by category
+        summaries_by_category = {}
+        for summary in summaries:
+            summaries_by_category[summary.category] = summary.content
+            
+        return summaries_by_category
+    except Exception as e:
+        logger.error(f"Error fetching summaries for report {report_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching summaries: {str(e)}") 

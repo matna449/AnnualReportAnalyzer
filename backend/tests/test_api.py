@@ -21,6 +21,6 @@ def test_dashboard_summary():
     response = client.get("/api/dashboard/summary")
     assert response.status_code == 200
     data = response.json()
-    assert "total_reports" in data
-    assert "total_companies" in data
-    assert "recent_uploads" in data 
+    assert "report_count" in data
+    assert "company_count" in data
+    assert "latest_upload_date" in data 

@@ -76,6 +76,15 @@ export default function ReportDetails({ params }: { params: { id: string } }) {
         
         const data = await response.json();
         console.log('Report data:', data);
+        
+        // Fetch summaries specifically from the new endpoint
+        const summariesResponse = await fetch(`/api/reports/${params.id}/summaries`);
+        if (summariesResponse.ok) {
+          const summariesData = await summariesResponse.json();
+          // Merge summaries into the report data
+          data.summaries = summariesData;
+        }
+        
         setReportData(data);
         
         // Fetch related reports (same company or sector)
@@ -238,77 +247,187 @@ export default function ReportDetails({ params }: { params: { id: string } }) {
             </Box>
             
             <TabPanel value={tabValue} index={0}>
-              <Typography variant="body1" paragraph>
-                {reportData.summaries?.executive || "No executive summary available."}
-              </Typography>
-              <Divider sx={{ my: 2 }} />
-              <Typography variant="h6" gutterBottom>
-                Sentiment Analysis
-              </Typography>
-              <Box sx={{ mb: 2 }}>
-                <Chip 
-                  label={reportData.sentiment?.sentiment || "Neutral"} 
-                  color={
-                    reportData.sentiment?.sentiment === 'positive' ? 'success' : 
-                    reportData.sentiment?.sentiment === 'negative' ? 'error' : 'default'
+              {loading ? (
+                <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
+                  <CircularProgress />
+                </Box>
+              ) : error ? (
+                <Alert 
+                  severity="error" 
+                  sx={{ my: 2 }}
+                  action={
+                    <Button color="inherit" size="small" onClick={() => window.location.reload()}>
+                      Retry
+                    </Button>
                   }
-                  sx={{ mr: 1 }}
-                />
-              </Box>
-              <Typography variant="body2" color="text.secondary">
-                {reportData.sentiment?.explanation || "No sentiment analysis available."}
-              </Typography>
+                >
+                  {error}
+                </Alert>
+              ) : (
+                <>
+                  <Paper elevation={0} sx={{ p: 3, mb: 3, bgcolor: 'background.paper', borderRadius: 2 }}>
+                    <Typography variant="h5" gutterBottom color="primary" sx={{ fontWeight: 'medium' }}>
+                      Executive Summary
+                    </Typography>
+                    <Typography variant="body1" paragraph sx={{ lineHeight: 1.7, textAlign: 'justify' }}>
+                      {reportData.summaries?.executive || "No executive summary available."}
+                    </Typography>
+                  </Paper>
+                  
+                  <Paper elevation={0} sx={{ p: 3, bgcolor: 'background.paper', borderRadius: 2 }}>
+                    <Typography variant="h5" gutterBottom color="primary" sx={{ fontWeight: 'medium' }}>
+                      Sentiment Analysis
+                    </Typography>
+                    
+                    {reportData.summaries?.sentiment ? (
+                      <>
+                        <Box sx={{ 
+                          mb: 3, 
+                          p: 2, 
+                          borderRadius: 1, 
+                          bgcolor: reportData.summaries.sentiment.includes('positive') ? 'success.light' : 
+                                  reportData.summaries.sentiment.includes('negative') ? 'error.light' : 'info.light'
+                        }}>
+                          <Typography variant="h6" sx={{ 
+                            color: reportData.summaries.sentiment.includes('positive') ? 'success.dark' : 
+                                  reportData.summaries.sentiment.includes('negative') ? 'error.dark' : 'info.dark',
+                            display: 'flex',
+                            alignItems: 'center'
+                          }}>
+                            {reportData.summaries.sentiment.includes('positive') ? '😀 Positive' : 
+                             reportData.summaries.sentiment.includes('negative') ? '😟 Negative' : '😐 Neutral'}
+                          </Typography>
+                        </Box>
+                        <Typography variant="body1" sx={{ lineHeight: 1.7 }}>
+                          {reportData.summaries.sentiment}
+                        </Typography>
+                      </>
+                    ) : (
+                      <Alert severity="info">No sentiment analysis available.</Alert>
+                    )}
+                  </Paper>
+                </>
+              )}
             </TabPanel>
             
             <TabPanel value={tabValue} index={1}>
-              <Grid container spacing={3}>
-                {financialMetrics.length > 0 ? (
-                  financialMetrics.map((metric: any, index: number) => (
-                    <Grid item xs={12} sm={6} md={4} key={index}>
-                      <Card>
-                        <CardContent>
-                          <Typography variant="subtitle2" color="text.secondary">
-                            {metric.name}
-                          </Typography>
-                          <Typography variant="h5" component="div">
-                            {metric.value} {metric.unit}
-                          </Typography>
-                        </CardContent>
-                      </Card>
+              {loading ? (
+                <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
+                  <CircularProgress />
+                </Box>
+              ) : error ? (
+                <Alert 
+                  severity="error" 
+                  sx={{ my: 2 }}
+                  action={
+                    <Button color="inherit" size="small" onClick={() => window.location.reload()}>
+                      Retry
+                    </Button>
+                  }
+                >
+                  {error}
+                </Alert>
+              ) : (
+                <Grid container spacing={3}>
+                  {financialMetrics.length > 0 ? (
+                    financialMetrics.map((metric: any, index: number) => (
+                      <Grid item xs={12} sm={6} md={4} key={index}>
+                        <Card sx={{ 
+                          transition: 'transform 0.2s, box-shadow 0.2s', 
+                          '&:hover': { 
+                            transform: 'translateY(-4px)', 
+                            boxShadow: 4 
+                          } 
+                        }}>
+                          <CardContent>
+                            <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                              {metric.name}
+                            </Typography>
+                            <Typography variant="h5" component="div" color="primary.main" sx={{ fontWeight: 'bold' }}>
+                              {metric.value} {metric.unit}
+                            </Typography>
+                          </CardContent>
+                        </Card>
+                      </Grid>
+                    ))
+                  ) : (
+                    <Grid item xs={12}>
+                      <Alert severity="info">No financial metrics available.</Alert>
                     </Grid>
-                  ))
-                ) : (
-                  <Grid item xs={12}>
-                    <Alert severity="info">No financial metrics available.</Alert>
-                  </Grid>
-                )}
-              </Grid>
+                  )}
+                </Grid>
+              )}
             </TabPanel>
             
             <TabPanel value={tabValue} index={2}>
-              <Typography variant="h6" gutterBottom>
-                Risk Factors
-              </Typography>
-              {reportData.summaries?.risks ? (
-                <Typography variant="body1" component="div">
-                  {reportData.summaries.risks.split('\n').map((risk: string, index: number) => (
-                    <Box key={index} sx={{ mb: 1 }}>
-                      {risk}
-                    </Box>
-                  ))}
-                </Typography>
+              {loading ? (
+                <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
+                  <CircularProgress />
+                </Box>
+              ) : error ? (
+                <Alert 
+                  severity="error" 
+                  sx={{ my: 2 }}
+                  action={
+                    <Button color="inherit" size="small" onClick={() => window.location.reload()}>
+                      Retry
+                    </Button>
+                  }
+                >
+                  {error}
+                </Alert>
               ) : (
-                <Alert severity="info">No risk factors available.</Alert>
+                <>
+                  <Paper elevation={0} sx={{ p: 3, mb: 3, bgcolor: 'background.paper', borderRadius: 2 }}>
+                    <Typography variant="h5" gutterBottom color="primary" sx={{ fontWeight: 'medium' }}>
+                      Risk Factors
+                    </Typography>
+                    {reportData.summaries?.risks ? (
+                      <Box component="div" sx={{ maxHeight: '400px', overflowY: 'auto', pr: 2 }}>
+                        {reportData.summaries.risks.split('\n').map((risk: string, index: number) => (
+                          <Paper 
+                            key={index} 
+                            elevation={0}
+                            sx={{ 
+                              p: 2, 
+                              mb: 2, 
+                              bgcolor: 'error.light', 
+                              color: 'error.dark',
+                              borderRadius: 1
+                            }}
+                          >
+                            <Typography variant="body1">
+                              {risk}
+                            </Typography>
+                          </Paper>
+                        ))}
+                      </Box>
+                    ) : (
+                      <Alert severity="info">No risk factors available.</Alert>
+                    )}
+                  </Paper>
+                  
+                  <Paper elevation={0} sx={{ p: 3, bgcolor: 'background.paper', borderRadius: 2 }}>
+                    <Typography variant="h5" gutterBottom color="primary" sx={{ fontWeight: 'medium' }}>
+                      Business Outlook
+                    </Typography>
+                    {reportData.summaries?.outlook ? (
+                      <Box sx={{ 
+                        p: 2, 
+                        borderRadius: 1, 
+                        bgcolor: 'info.light', 
+                        color: 'info.dark' 
+                      }}>
+                        <Typography variant="body1" sx={{ lineHeight: 1.7, textAlign: 'justify' }}>
+                          {reportData.summaries.outlook}
+                        </Typography>
+                      </Box>
+                    ) : (
+                      <Alert severity="info">No business outlook available.</Alert>
+                    )}
+                  </Paper>
+                </>
               )}
-              
-              <Divider sx={{ my: 2 }} />
-              
-              <Typography variant="h6" gutterBottom>
-                Business Outlook
-              </Typography>
-              <Typography variant="body1" paragraph>
-                {reportData.summaries?.outlook || "No business outlook available."}
-              </Typography>
             </TabPanel>
           </Paper>
         </Grid>
