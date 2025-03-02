@@ -45,21 +45,27 @@ export default function Dashboard() {
         // Fetch dashboard summary data
         const summaryResponse = await fetch('/api/dashboard/summary');
         if (!summaryResponse.ok) {
-          throw new Error('Failed to fetch dashboard summary');
+          const summaryErrorText = await summaryResponse.text();
+          console.error('Dashboard summary error details:', summaryErrorText);
+          throw new Error(`Failed to fetch dashboard summary: ${summaryResponse.status} ${summaryResponse.statusText}`);
         }
         const summaryData = await summaryResponse.json();
         
         // Fetch recent reports
         const reportsResponse = await fetch('/api/dashboard/recent-reports');
         if (!reportsResponse.ok) {
-          throw new Error('Failed to fetch recent reports');
+          const reportsErrorText = await reportsResponse.text();
+          console.error('Recent reports error details:', reportsErrorText);
+          throw new Error(`Failed to fetch recent reports: ${reportsResponse.status} ${reportsResponse.statusText}`);
         }
         const reportsData = await reportsResponse.json();
         
         // Fetch companies
         const companiesResponse = await fetch('/api/companies/');
         if (!companiesResponse.ok) {
-          throw new Error('Failed to fetch companies');
+          const companiesErrorText = await companiesResponse.text();
+          console.error('Companies error details:', companiesErrorText);
+          throw new Error(`Failed to fetch companies: ${companiesResponse.status} ${companiesResponse.statusText}`);
         }
         const companiesData = await companiesResponse.json();
         
@@ -311,25 +317,19 @@ export default function Dashboard() {
                   </Paper>
                 )}
                 {tabValue === 'risks' && dashboardData.latest_summaries.risks && (
-                  <Box component="div">
-                    {dashboardData.latest_summaries.risks.split('\n').map((risk, index) => (
-                      <Paper 
-                        key={index} 
-                        elevation={0}
-                        sx={{ 
-                          p: 2, 
-                          mb: 2, 
-                          bgcolor: 'error.light', 
-                          color: 'error.dark',
-                          borderRadius: 1
-                        }}
-                      >
-                        <Typography variant="body1">
-                          {risk}
-                        </Typography>
-                      </Paper>
-                    ))}
-                  </Box>
+                  <Paper 
+                    elevation={0} 
+                    sx={{ 
+                      p: 2, 
+                      bgcolor: 'info.light', 
+                      color: 'info.dark',
+                      borderRadius: 2 
+                    }}
+                  >
+                    <Typography variant="body1" sx={{ lineHeight: 1.7, textAlign: 'justify' }}>
+                      {dashboardData.latest_summaries.risks}
+                    </Typography>
+                  </Paper>
                 )}
                 {tabValue === 'outlook' && dashboardData.latest_summaries.outlook && (
                   <Paper 

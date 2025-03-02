@@ -1,13 +1,15 @@
 import logging
+import json
 from typing import List, Dict, Any, Optional, Union
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_, func
 from datetime import datetime
 
-from models.database import Company, Report, Metric, Summary
+from models.database import Company, Report, Metric, Summary, Entity, SentimentAnalysis, RiskAssessment
 from models.schemas import (
     CompanyCreate, CompanyUpdate, ReportCreate, 
-    MetricCreate, SummaryCreate, SearchParams
+    MetricCreate, SummaryCreate, SearchParams,
+    EntityCreate, SentimentAnalysisCreate, RiskAssessmentCreate
 )
 
 logger = logging.getLogger(__name__)
@@ -270,6 +272,15 @@ class DBService:
             raise
     
     @staticmethod
+    def get_summaries_by_report_id(db: Session, report_id: int) -> List[Summary]:
+        """Get all summaries for a report."""
+        try:
+            return db.query(Summary).filter(Summary.report_id == report_id).all()
+        except Exception as e:
+            logger.error(f"Error getting summaries for report {report_id}: {str(e)}")
+            return []
+    
+    @staticmethod
     def search_reports(db: Session, params: SearchParams, skip: int = 0, limit: int = 100) -> List[Report]:
         """Search for reports based on various criteria."""
         try:
@@ -446,4 +457,247 @@ class DBService:
             return {"metrics": metrics_data}
         except Exception as e:
             logger.error(f"Error getting company metrics: {str(e)}")
-            raise 
+            raise
+    
+    @staticmethod
+    def create_entity(db: Session, entity: EntityCreate) -> Entity:
+        """Create a new entity."""
+        try:
+            db_entity = Entity(
+                report_id=entity.report_id,
+                entity_type=entity.entity_type,
+                text=entity.text,
+                score=entity.score,
+                section=entity.section
+            )
+            db.add(db_entity)
+            db.commit()
+            db.refresh(db_entity)
+            return db_entity
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error creating entity: {str(e)}")
+            raise
+    
+    @staticmethod
+    def create_sentiment_analysis(db: Session, sentiment: SentimentAnalysisCreate) -> SentimentAnalysis:
+        """Create a new sentiment analysis."""
+        try:
+            db_sentiment = SentimentAnalysis(
+                report_id=sentiment.report_id,
+                section=sentiment.section,
+                sentiment=sentiment.sentiment,
+                score=sentiment.score,
+                distribution=sentiment.distribution,
+                insight=sentiment.insight
+            )
+            db.add(db_sentiment)
+            db.commit()
+            db.refresh(db_sentiment)
+            return db_sentiment
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error creating sentiment analysis: {str(e)}")
+            raise
+    
+    @staticmethod
+    def create_risk_assessment(db: Session, risk: RiskAssessmentCreate) -> RiskAssessment:
+        """Create a new risk assessment."""
+        try:
+            db_risk = RiskAssessment(
+                report_id=risk.report_id,
+                overall_score=risk.overall_score,
+                categories=risk.categories,
+                primary_factors=risk.primary_factors,
+                insight=risk.insight
+            )
+            db.add(db_risk)
+            db.commit()
+            db.refresh(db_risk)
+            return db_risk
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error creating risk assessment: {str(e)}")
+            raise
+    
+    @staticmethod
+    def get_entities_by_report_id(db: Session, report_id: int) -> List[Entity]:
+        """Get all entities for a report."""
+        return db.query(Entity).filter(Entity.report_id == report_id).all()
+    
+    @staticmethod
+    def get_sentiment_analysis_by_report_id(db: Session, report_id: int) -> Optional[SentimentAnalysis]:
+        """Get sentiment analysis for a report."""
+        return db.query(SentimentAnalysis).filter(SentimentAnalysis.report_id == report_id).first()
+    
+    @staticmethod
+    def get_risk_assessment_by_report_id(db: Session, report_id: int) -> Optional[RiskAssessment]:
+        """Get risk assessment for a report."""
+        return db.query(RiskAssessment).filter(RiskAssessment.report_id == report_id).first()
+    
+    @staticmethod
+    def store_enhanced_analysis(db: Session, report_id: int, analysis_results: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Store enhanced analysis results including entities, sentiment, and risk assessment.
+        
+        Args:
+            db: Database session
+            report_id: ID of the report
+            analysis_results: Dictionary with analysis results
+            
+        Returns:
+            Dictionary with stored analysis IDs
+        """
+        result_ids = {}
+        
+        try:
+            # Store entities
+            if "entities" in analysis_results and "entities" in analysis_results["entities"]:
+                entities = analysis_results["entities"]["entities"]
+                entity_ids = []
+                
+                for entity_type, entity_list in entities.items():
+                    for entity in entity_list:
+                        entity_create = EntityCreate(
+                            report_id=report_id,
+                            entity_type=entity_type,
+                            text=entity["text"],
+                            score=entity.get("score", 0.0),
+                            section=None  # Could be added if section info is available
+                        )
+                        db_entity = DBService.create_entity(db, entity_create)
+                        entity_ids.append(db_entity.id)
+                
+                result_ids["entity_ids"] = entity_ids
+            
+            # Store sentiment analysis
+            if "sentiment" in analysis_results:
+                sentiment = analysis_results["sentiment"]
+                sentiment_create = SentimentAnalysisCreate(
+                    report_id=report_id,
+                    sentiment=sentiment.get("sentiment", "neutral"),
+                    score=sentiment.get("score", 0.5),
+                    distribution=sentiment.get("sentiment_distribution", {}),
+                    insight=analysis_results.get("insights", {}).get("sentiment")
+                )
+                db_sentiment = DBService.create_sentiment_analysis(db, sentiment_create)
+                result_ids["sentiment_id"] = db_sentiment.id
+            
+            # Store risk assessment
+            if "risk" in analysis_results:
+                risk = analysis_results["risk"]
+                risk_create = RiskAssessmentCreate(
+                    report_id=report_id,
+                    overall_score=risk.get("overall_risk_score", 0.0),
+                    categories=risk.get("risk_categories", {}),
+                    primary_factors=risk.get("primary_risk_factors", []),
+                    insight=analysis_results.get("insights", {}).get("risk")
+                )
+                db_risk = DBService.create_risk_assessment(db, risk_create)
+                result_ids["risk_id"] = db_risk.id
+            
+            # Store overall insight as a summary
+            if "insights" in analysis_results and "overall" in analysis_results["insights"]:
+                summary_create = SummaryCreate(
+                    report_id=report_id,
+                    category="ai_insight",
+                    content=analysis_results["insights"]["overall"]
+                )
+                db_summary = DBService.create_summary(db, summary_create)
+                result_ids["summary_id"] = db_summary.id
+            
+            return result_ids
+        
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error storing enhanced analysis: {str(e)}")
+            raise
+    
+    @staticmethod
+    def get_enhanced_analysis_by_report_id(db: Session, report_id: int) -> Dict[str, Any]:
+        """
+        Get enhanced analysis results for a report.
+        
+        Args:
+            db: Database session
+            report_id: ID of the report
+            
+        Returns:
+            Dictionary with enhanced analysis results
+        """
+        try:
+            # Get entities
+            entities = DBService.get_entities_by_report_id(db, report_id)
+            
+            # Organize entities by type
+            entity_dict = {}
+            for entity in entities:
+                if entity.entity_type not in entity_dict:
+                    entity_dict[entity.entity_type] = []
+                
+                entity_dict[entity.entity_type].append({
+                    "id": entity.id,
+                    "text": entity.text,
+                    "score": entity.score,
+                    "section": entity.section
+                })
+            
+            # Get sentiment analysis
+            sentiment = DBService.get_sentiment_analysis_by_report_id(db, report_id)
+            sentiment_dict = None
+            if sentiment:
+                sentiment_dict = {
+                    "id": sentiment.id,
+                    "sentiment": sentiment.sentiment,
+                    "score": sentiment.score,
+                    "distribution": sentiment.distribution,
+                    "insight": sentiment.insight
+                }
+            
+            # Get risk assessment
+            risk = DBService.get_risk_assessment_by_report_id(db, report_id)
+            risk_dict = None
+            if risk:
+                risk_dict = {
+                    "id": risk.id,
+                    "overall_score": risk.overall_score,
+                    "categories": risk.categories,
+                    "primary_factors": risk.primary_factors,
+                    "insight": risk.insight
+                }
+            
+            # Get AI insight summary
+            ai_insight = db.query(Summary).filter(
+                Summary.report_id == report_id,
+                Summary.category == "ai_insight"
+            ).first()
+            
+            insights = {}
+            if sentiment and sentiment.insight:
+                insights["sentiment"] = sentiment.insight
+            if risk and risk.insight:
+                insights["risk"] = risk.insight
+            if ai_insight:
+                insights["overall"] = ai_insight.content
+            
+            return {
+                "entities": entity_dict,
+                "sentiment": sentiment_dict,
+                "risk": risk_dict,
+                "insights": insights
+            }
+        
+        except Exception as e:
+            logger.error(f"Error getting enhanced analysis: {str(e)}")
+            return {
+                "entities": {},
+                "sentiment": None,
+                "risk": None,
+                "insights": {},
+                "error": str(e)
+            }
+    
+    @staticmethod
+    def get_report_by_id(db: Session, report_id: int) -> Optional[Report]:
+        """Get a report by ID."""
+        return db.query(Report).filter(Report.id == report_id).first() 

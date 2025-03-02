@@ -1,18 +1,27 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, BackgroundTasks
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime
+import os
 
 from models.database_session import get_db
 from models.schemas import (
     Company, CompanyCreate, CompanyUpdate,
-    Report, SearchParams, ComparisonRequest
+    Report, SearchParams, ComparisonRequest,
+    MetricCreate, Metric,
+    SummaryCreate, Summary,
+    UploadResponse, AnalysisResult,
+    ComparisonResult,
+    EntityCreate, SentimentAnalysisCreate, RiskAssessmentCreate,
+    ReportCreate
 )
 from services.analysis_service import AnalysisService
 from services.db_service import DBService  # Consistent import path
 from api.pdf_processing_routes import router as pdf_router
+from services.file_service import FileService
+from services.huggingface_service import HuggingFaceService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -106,54 +115,79 @@ async def upload_report(
         
         logger.info(f"Processing upload: {file.filename} for company {company_name}, year {year}")
         
-        # Read file content
-        try:
-            file_content = await file.read()
-            if not file_content or len(file_content) < 100:  # Basic check for empty or corrupt files
-                return JSONResponse(
-                    status_code=400,
-                    content={"detail": "File appears to be empty or corrupt"}
-                )
-        except Exception as e:
-            logger.error(f"Error reading uploaded file: {str(e)}")
+        # Create upload directory if it doesn't exist
+        upload_dir = os.path.join(os.getcwd(), "uploads")
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Generate a unique filename
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        safe_filename = f"{company_name.replace(' ', '_')}_{year}_{timestamp}.pdf"
+        file_path = os.path.join(upload_dir, safe_filename)
+        
+        # Save the file using FileService
+        file_result = await FileService.save_uploaded_file(file, file_path)
+        
+        if not file_result["success"]:
+            logger.error(f"Error saving file: {file_result.get('error', 'Unknown error')}")
             return JSONResponse(
-                status_code=400,
-                content={"detail": f"Error reading uploaded file: {str(e)}"}
+                status_code=500,
+                content={"detail": f"Error saving file: {file_result.get('error', 'Unknown error')}"}
             )
         
         # Process the report
         try:
-            result = await analysis_service.process_report(
-                db, file_content, file.filename, company_name, year, ticker, sector
+            # Get company (create if not exists)
+            db_company = DBService.get_company_by_name(db, company_name)
+            if not db_company:
+                company_create = CompanyCreate(
+                    name=company_name,
+                    ticker=ticker,
+                    sector=sector
+                )
+                db_company = DBService.create_company(db, company_create)
+            
+            # Create report
+            report_create = ReportCreate(
+                company_id=db_company.id,
+                year=str(year),
+                file_name=file.filename,
+                file_path=file_path,
+                processing_status="pending"
+            )
+            db_report = DBService.create_report(db, report_create)
+            
+            # Start analysis in background
+            background_tasks = BackgroundTasks()
+            background_tasks.add_task(
+                analysis_service.analyze_report,
+                db=db,
+                report_id=db_report.id
             )
             
-            logger.info(f"Successfully processed report: {file.filename}, report_id: {result['report_id']}")
+            logger.info(f"Successfully uploaded report: {file.filename}, report_id: {db_report.id}")
             
             return JSONResponse(
                 status_code=200,
                 content={
-                    "message": "Report uploaded and processed successfully",
-                    "report_id": result["report_id"],
-                    "company_id": result["company_id"],
-                    "status": result["status"]
+                    "message": "Report uploaded successfully. Analysis started in background.",
+                    "report_id": db_report.id,
+                    "company_id": db_company.id,
+                    "status": "pending"
                 }
             )
         except Exception as e:
             logger.error(f"Error processing report: {str(e)}")
-            # Check if the transaction needs to be rolled back
-            db.rollback()
+            # Clean up the file if there was an error
+            FileService.delete_file(file_path)
             return JSONResponse(
                 status_code=500,
                 content={"detail": f"Error processing report: {str(e)}"}
             )
-            
     except Exception as e:
-        logger.error(f"Unexpected error uploading report: {str(e)}")
-        # Ensure transaction is rolled back
-        db.rollback()
+        logger.error(f"Unexpected error in upload: {str(e)}")
         return JSONResponse(
             status_code=500,
-            content={"detail": f"Error uploading report: {str(e)}"}
+            content={"detail": f"Unexpected error: {str(e)}"}
         )
 
 @router.get("/reports/")
@@ -492,4 +526,134 @@ async def get_report_summaries(
         return summaries_by_category
     except Exception as e:
         logger.error(f"Error fetching summaries for report {report_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching summaries: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Error fetching summaries: {str(e)}")
+
+@router.post("/reports/{report_id}/enhanced-analysis", response_model=Dict[str, Any])
+def run_enhanced_analysis(
+    report_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """
+    Run enhanced analysis on a report using Hugging Face models.
+    This includes entity extraction, sentiment analysis, and risk assessment.
+    """
+    try:
+        # Check if report exists
+        report = DBService.get_report_by_id(db, report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail=f"Report with ID {report_id} not found")
+        
+        # Get report summaries
+        summaries = DBService.get_summaries_by_report_id(db, report_id)
+        if not summaries:
+            raise HTTPException(status_code=400, detail="Report has no summaries to analyze")
+        
+        # Run analysis in background
+        background_tasks.add_task(
+            process_enhanced_analysis,
+            db=db,
+            report_id=report_id,
+            summaries=summaries
+        )
+        
+        return {"status": "success", "message": "Enhanced analysis started", "report_id": report_id}
+    except HTTPException as e:
+        # Re-raise HTTP exceptions
+        raise e
+    except Exception as e:
+        logger.error(f"Error starting enhanced analysis for report {report_id}: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": f"Error starting enhanced analysis: {str(e)}", "report_id": report_id}
+        )
+
+@router.get("/reports/{report_id}/enhanced-analysis", response_model=Dict[str, Any])
+def get_enhanced_analysis(
+    report_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Get enhanced analysis results for a report.
+    """
+    # Check if report exists
+    report = DBService.get_report_by_id(db, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail=f"Report with ID {report_id} not found")
+    
+    # Get enhanced analysis
+    analysis = DBService.get_enhanced_analysis_by_report_id(db, report_id)
+    
+    # Check if analysis exists
+    if not analysis.get("entities") and not analysis.get("sentiment") and not analysis.get("risk"):
+        return {
+            "status": "pending",
+            "message": "Enhanced analysis not yet available",
+            "report_id": report_id
+        }
+    
+    return {
+        "status": "success",
+        "report_id": report_id,
+        "analysis": analysis
+    }
+
+async def process_enhanced_analysis(db: Session, report_id: int, summaries: List[Summary]):
+    """
+    Process enhanced analysis for a report.
+    """
+    try:
+        # Initialize HuggingFace service
+        hf_service = HuggingFaceService()
+        
+        # Combine summaries into a single text for analysis
+        text = ""
+        for summary in summaries:
+            text += f"\n\n{summary.category.upper()}:\n{summary.content}"
+        
+        logger.info(f"Starting enhanced analysis for report {report_id} with text length: {len(text)}")
+        
+        # Run analysis
+        try:
+            analysis_results = hf_service.analyze_financial_text(text)
+            logger.info(f"Analysis completed for report {report_id}")
+        except Exception as analysis_error:
+            logger.error(f"Error in HuggingFace analysis for report {report_id}: {str(analysis_error)}")
+            # Use fallback analysis
+            analysis_results = {
+                "entities": {"entities": {}},
+                "sentiment": {
+                    "sentiment": "neutral",
+                    "score": 0.5,
+                    "sentiment_distribution": {"positive": 0.33, "neutral": 0.34, "negative": 0.33}
+                },
+                "risk": {
+                    "overall_risk_score": 0.5,
+                    "risk_categories": {"market_risk": 0.5, "operational_risk": 0.5},
+                    "primary_risk_factors": ["Unable to analyze risk factors due to API error"]
+                },
+                "insights": {
+                    "overall": "Analysis could not be completed due to API limitations. Please try again later.",
+                    "sentiment": "Sentiment analysis could not be completed.",
+                    "risk": "Risk assessment could not be completed."
+                }
+            }
+        
+        # Store results
+        try:
+            result_ids = DBService.store_enhanced_analysis(db, report_id, analysis_results)
+            logger.info(f"Enhanced analysis stored for report {report_id}: {result_ids}")
+        except Exception as db_error:
+            logger.error(f"Error storing enhanced analysis for report {report_id}: {str(db_error)}")
+            raise
+        
+    except Exception as e:
+        logger.error(f"Error processing enhanced analysis for report {report_id}: {str(e)}")
+        # Update report status to indicate error
+        try:
+            report = DBService.get_report_by_id(db, report_id)
+            if report:
+                report.processing_status = "error_enhanced_analysis"
+                db.commit()
+        except Exception as update_error:
+            logger.error(f"Error updating report status for {report_id}: {str(update_error)}") 

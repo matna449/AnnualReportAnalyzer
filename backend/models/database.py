@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, Text, DateTime, create_engine
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, Text, DateTime, create_engine, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -43,6 +43,9 @@ class Report(Base):
     company = relationship("Company", back_populates="reports")
     metrics = relationship("Metric", back_populates="report", cascade="all, delete-orphan")
     summaries = relationship("Summary", back_populates="report", cascade="all, delete-orphan")
+    entities = relationship("Entity", back_populates="report", cascade="all, delete-orphan")
+    sentiment_analyses = relationship("SentimentAnalysis", back_populates="report", cascade="all, delete-orphan")
+    risk_assessments = relationship("RiskAssessment", back_populates="report", cascade="all, delete-orphan")
 
 
 class Metric(Base):
@@ -69,6 +72,49 @@ class Summary(Base):
     
     # Relationships
     report = relationship("Report", back_populates="summaries")
+
+
+class Entity(Base):
+    __tablename__ = "entities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    report_id = Column(Integer, ForeignKey("reports.id"), nullable=False)
+    entity_type = Column(String(50), nullable=False)  # MONEY, ORG, DATE, etc.
+    text = Column(String(255), nullable=False)
+    score = Column(Float, nullable=True)
+    section = Column(String(100), nullable=True)  # Which section of the report this entity was found in
+    
+    # Relationships
+    report = relationship("Report", back_populates="entities")
+
+
+class SentimentAnalysis(Base):
+    __tablename__ = "sentiment_analyses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    report_id = Column(Integer, ForeignKey("reports.id"), nullable=False)
+    section = Column(String(100), nullable=True)  # Which section of the report this sentiment applies to
+    sentiment = Column(String(20), nullable=False)  # positive, negative, neutral
+    score = Column(Float, nullable=False)
+    distribution = Column(JSON, nullable=True)  # JSON object with sentiment distribution
+    insight = Column(Text, nullable=True)
+    
+    # Relationships
+    report = relationship("Report", back_populates="sentiment_analyses")
+
+
+class RiskAssessment(Base):
+    __tablename__ = "risk_assessments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    report_id = Column(Integer, ForeignKey("reports.id"), nullable=False)
+    overall_score = Column(Float, nullable=False)
+    categories = Column(JSON, nullable=True)  # JSON object with risk categories and scores
+    primary_factors = Column(JSON, nullable=True)  # JSON object with primary risk factors
+    insight = Column(Text, nullable=True)
+    
+    # Relationships
+    report = relationship("Report", back_populates="risk_assessments")
 
 
 # Create all tables

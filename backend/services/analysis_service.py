@@ -3,6 +3,8 @@ import logging
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from datetime import datetime
+import PyPDF2
+import io
 
 from services.pdf_service import PDFService
 from services.ai_service import AIService
@@ -25,6 +27,79 @@ class AnalysisService:
         # Create uploads directory if it doesn't exist
         if not os.path.exists(self.upload_dir):
             os.makedirs(self.upload_dir)
+    
+    async def analyze_report(self, db: Session, report_id: int) -> Dict[str, Any]:
+        """
+        Analyze a report that has already been uploaded.
+        This method is designed to be run in the background.
+        
+        Args:
+            db: Database session
+            report_id: ID of the report to analyze
+            
+        Returns:
+            Dictionary with analysis results
+        """
+        try:
+            # Get the report
+            report = DBService.get_report_by_id(db, report_id)
+            if not report:
+                logger.error(f"Report with ID {report_id} not found")
+                return {"status": "error", "message": f"Report with ID {report_id} not found"}
+            
+            # Update report status
+            DBService.update_report_status(db, report_id, "processing")
+            
+            # Read the PDF file
+            file_path = report.file_path
+            if not os.path.exists(file_path):
+                logger.error(f"PDF file not found at path: {file_path}")
+                DBService.update_report_status(db, report_id, "failed")
+                return {"status": "error", "message": "PDF file not found"}
+            
+            try:
+                # Extract text from PDF
+                with open(file_path, 'rb') as pdf_file:
+                    pdf_reader = PyPDF2.PdfReader(pdf_file)
+                    page_count = len(pdf_reader.pages)
+                    
+                    # Update page count
+                    report.page_count = page_count
+                    db.commit()
+                    
+                    # Extract text from each page
+                    text = ""
+                    for page_num in range(min(page_count, 100)):  # Limit to first 100 pages
+                        page = pdf_reader.pages[page_num]
+                        text += page.extract_text() + "\n\n"
+                
+                # Analyze the text
+                analysis_result = await self.analyze_report_text(text, report_id)
+                
+                # Store analysis results
+                self._store_analysis_results(db, report_id, analysis_result)
+                
+                # Update report status
+                DBService.update_report_status(db, report_id, "completed")
+                
+                return {
+                    "status": "success",
+                    "report_id": report_id,
+                    "message": "Report analyzed successfully"
+                }
+                
+            except Exception as e:
+                logger.error(f"Error processing PDF: {str(e)}")
+                DBService.update_report_status(db, report_id, "failed")
+                return {"status": "error", "message": f"Error processing PDF: {str(e)}"}
+            
+        except Exception as e:
+            logger.error(f"Error analyzing report {report_id}: {str(e)}")
+            try:
+                DBService.update_report_status(db, report_id, "failed")
+            except:
+                pass
+            return {"status": "error", "message": f"Error analyzing report: {str(e)}"}
     
     async def process_report(
         self, 

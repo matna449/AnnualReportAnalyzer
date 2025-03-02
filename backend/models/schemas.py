@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 
 
@@ -114,6 +114,79 @@ class Summary(SummaryInDB):
     pass
 
 
+# Entity schemas
+class EntityBase(BaseModel):
+    entity_type: str
+    text: str
+    score: Optional[float] = None
+    section: Optional[str] = None
+
+
+class EntityCreate(EntityBase):
+    report_id: int
+
+
+class EntityInDB(EntityBase):
+    id: int
+    report_id: int
+
+    class Config:
+        from_attributes = True
+
+
+class Entity(EntityInDB):
+    pass
+
+
+# Sentiment Analysis schemas
+class SentimentAnalysisBase(BaseModel):
+    section: Optional[str] = None
+    sentiment: str
+    score: float
+    distribution: Optional[Dict[str, float]] = None
+    insight: Optional[str] = None
+
+
+class SentimentAnalysisCreate(SentimentAnalysisBase):
+    report_id: int
+
+
+class SentimentAnalysisInDB(SentimentAnalysisBase):
+    id: int
+    report_id: int
+
+    class Config:
+        from_attributes = True
+
+
+class SentimentAnalysis(SentimentAnalysisInDB):
+    pass
+
+
+# Risk Assessment schemas
+class RiskAssessmentBase(BaseModel):
+    overall_score: float
+    categories: Optional[Dict[str, float]] = None
+    primary_factors: Optional[List[Dict[str, Union[str, float]]]] = None
+    insight: Optional[str] = None
+
+
+class RiskAssessmentCreate(RiskAssessmentBase):
+    report_id: int
+
+
+class RiskAssessmentInDB(RiskAssessmentBase):
+    id: int
+    report_id: int
+
+    class Config:
+        from_attributes = True
+
+
+class RiskAssessment(RiskAssessmentInDB):
+    pass
+
+
 # Upload schemas
 class UploadResponse(BaseModel):
     company_id: int
@@ -129,6 +202,19 @@ class AnalysisResult(BaseModel):
     status: str
     metrics: List[Metric] = []
     summaries: Dict[str, str] = {}
+    entities: Optional[Dict[str, List[Entity]]] = None
+    sentiment: Optional[SentimentAnalysis] = None
+    risk: Optional[RiskAssessment] = None
+    insights: Optional[Dict[str, str]] = None
+
+
+# Enhanced Analysis Response
+class EnhancedAnalysisResponse(BaseModel):
+    report_id: int
+    sentiment: Optional[SentimentAnalysis] = None
+    entities: Optional[Dict[str, List[Entity]]] = None
+    risk: Optional[RiskAssessment] = None
+    insights: Optional[Dict[str, str]] = None
 
 
 # Search schemas

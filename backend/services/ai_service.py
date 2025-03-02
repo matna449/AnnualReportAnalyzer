@@ -72,6 +72,7 @@ class AIService:
             else:
                 logger.warning(f"FinBERT API key validation returned status code: {response.status_code}")
                 logger.warning(response.text)
+                logger.warning(response)
         except Exception as e:
             logger.error(f"Error validating Hugging Face API key for FinBERT: {str(e)}")
     
