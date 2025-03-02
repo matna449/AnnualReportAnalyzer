@@ -56,4 +56,6 @@ __pycache__/
 /uploads
 /storage
 
+/setup_finbert.py
+
 annual_report_analyser/.next/
