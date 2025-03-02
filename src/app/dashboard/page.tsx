@@ -34,6 +34,7 @@ export default function Dashboard() {
   const [selectedCompany, setSelectedCompany] = useState<number | null>(null);
   const [companyMetrics, setCompanyMetrics] = useState<any[]>([]);
   const [metricType, setMetricType] = useState<string>('revenue');
+  const [tabValue, setTabValue] = useState<string>('executive');
 
   useEffect(() => {
     const fetchDashboardData = async () => {
@@ -268,6 +269,64 @@ export default function Dashboard() {
               colors={['#8884d8']}
             />
           </Paper>
+          
+          {/* Latest Summaries Section */}
+          {dashboardData?.latest_summaries && Object.keys(dashboardData.latest_summaries).length > 0 && (
+            <Paper sx={{ p: 2, mb: 3 }}>
+              <Typography variant="h6" gutterBottom>
+                Latest Report Insights
+              </Typography>
+              
+              <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}>
+                <Tabs 
+                  value={tabValue || 'executive'} 
+                  onChange={(e, newValue) => setTabValue(newValue)}
+                  variant="scrollable"
+                  scrollButtons="auto"
+                >
+                  {dashboardData.latest_summaries.executive && (
+                    <Tab label="Executive Summary" value="executive" />
+                  )}
+                  {dashboardData.latest_summaries.risks && (
+                    <Tab label="Risk Factors" value="risks" />
+                  )}
+                  {dashboardData.latest_summaries.outlook && (
+                    <Tab label="Business Outlook" value="outlook" />
+                  )}
+                  {dashboardData.latest_summaries.sentiment && (
+                    <Tab label="Sentiment" value="sentiment" />
+                  )}
+                </Tabs>
+              </Box>
+              
+              <Box sx={{ p: 1 }}>
+                {tabValue === 'executive' && dashboardData.latest_summaries.executive && (
+                  <Typography variant="body1">
+                    {dashboardData.latest_summaries.executive}
+                  </Typography>
+                )}
+                {tabValue === 'risks' && dashboardData.latest_summaries.risks && (
+                  <Typography variant="body1" component="div">
+                    {dashboardData.latest_summaries.risks.split('\n').map((risk, index) => (
+                      <Box key={index} sx={{ mb: 1 }}>
+                        {risk}
+                      </Box>
+                    ))}
+                  </Typography>
+                )}
+                {tabValue === 'outlook' && dashboardData.latest_summaries.outlook && (
+                  <Typography variant="body1">
+                    {dashboardData.latest_summaries.outlook}
+                  </Typography>
+                )}
+                {tabValue === 'sentiment' && dashboardData.latest_summaries.sentiment && (
+                  <Typography variant="body1">
+                    {dashboardData.latest_summaries.sentiment}
+                  </Typography>
+                )}
+              </Box>
+            </Paper>
+          )}
           
           {companies.length > 0 && (
             <Paper sx={{ p: 2 }}>

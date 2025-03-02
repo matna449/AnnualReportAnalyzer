@@ -269,8 +269,13 @@ async def get_dashboard_summary(
         
         # Get latest upload date
         latest_upload_date = None
+        latest_report_id = None
         if report_count > 0:
-            latest_upload_date = max(report.upload_date for report in DBService.get_reports(db))
+            recent_reports = DBService.get_recent_reports(db, limit=1)
+            if recent_reports:
+                latest_report = recent_reports[0]
+                latest_upload_date = latest_report.upload_date
+                latest_report_id = latest_report.id
         
         # Get reports by status
         status_counts = {}
@@ -288,12 +293,20 @@ async def get_dashboard_summary(
                 year_counts[year] = 0
             year_counts[year] += 1
         
+        # Get latest summaries if available
+        latest_summaries = {}
+        if latest_report_id:
+            summaries = DBService.get_summaries_by_report(db, latest_report_id)
+            for summary in summaries:
+                latest_summaries[summary.category] = summary.content
+        
         return {
             "company_count": company_count,
             "report_count": report_count,
             "latest_upload_date": latest_upload_date,
             "status_counts": status_counts,
-            "year_counts": year_counts
+            "year_counts": year_counts,
+            "latest_summaries": latest_summaries
         }
     except Exception as e:
         logger.error(f"Error getting dashboard summary: {str(e)}")
@@ -346,4 +359,23 @@ async def get_sector_distribution(
         return result
     except Exception as e:
         logger.error(f"Error getting sector distribution: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error") 
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@router.get("/reports/{report_id}/summaries", response_model=Dict[str, str])
+async def get_report_summaries(
+    report_id: int,
+    db: Session = Depends(get_db)
+):
+    """Get all summaries for a specific report, organized by category."""
+    try:
+        summaries = DBService.get_summaries_by_report(db, report_id)
+        
+        # Organize summaries by category
+        summaries_by_category = {}
+        for summary in summaries:
+            summaries_by_category[summary.category] = summary.content
+            
+        return summaries_by_category
+    except Exception as e:
+        logger.error(f"Error fetching summaries for report {report_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching summaries: {str(e)}") 

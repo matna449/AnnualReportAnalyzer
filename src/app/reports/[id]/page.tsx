@@ -76,6 +76,15 @@ export default function ReportDetails({ params }: { params: { id: string } }) {
         
         const data = await response.json();
         console.log('Report data:', data);
+        
+        // Fetch summaries specifically from the new endpoint
+        const summariesResponse = await fetch(`/api/reports/${params.id}/summaries`);
+        if (summariesResponse.ok) {
+          const summariesData = await summariesResponse.json();
+          // Merge summaries into the report data
+          data.summaries = summariesData;
+        }
+        
         setReportData(data);
         
         // Fetch related reports (same company or sector)
