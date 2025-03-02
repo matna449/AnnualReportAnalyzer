@@ -273,7 +273,8 @@ export default function Dashboard() {
           {/* Latest Summaries Section */}
           {dashboardData?.latest_summaries && Object.keys(dashboardData.latest_summaries).length > 0 && (
             <Paper sx={{ p: 2, mb: 3 }}>
-              <Typography variant="h6" gutterBottom>
+              <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
+                <DescriptionIcon sx={{ mr: 1, color: 'primary.main' }} />
                 Latest Report Insights
               </Typography>
               
@@ -283,6 +284,8 @@ export default function Dashboard() {
                   onChange={(e, newValue) => setTabValue(newValue)}
                   variant="scrollable"
                   scrollButtons="auto"
+                  textColor="primary"
+                  indicatorColor="primary"
                 >
                   {dashboardData.latest_summaries.executive && (
                     <Tab label="Executive Summary" value="executive" />
@@ -299,30 +302,70 @@ export default function Dashboard() {
                 </Tabs>
               </Box>
               
-              <Box sx={{ p: 1 }}>
+              <Box sx={{ p: 2, minHeight: '200px', maxHeight: '300px', overflowY: 'auto' }}>
                 {tabValue === 'executive' && dashboardData.latest_summaries.executive && (
-                  <Typography variant="body1">
-                    {dashboardData.latest_summaries.executive}
-                  </Typography>
+                  <Paper elevation={0} sx={{ p: 2, bgcolor: 'background.paper', borderRadius: 2 }}>
+                    <Typography variant="body1" sx={{ lineHeight: 1.7, textAlign: 'justify' }}>
+                      {dashboardData.latest_summaries.executive}
+                    </Typography>
+                  </Paper>
                 )}
                 {tabValue === 'risks' && dashboardData.latest_summaries.risks && (
-                  <Typography variant="body1" component="div">
+                  <Box component="div">
                     {dashboardData.latest_summaries.risks.split('\n').map((risk, index) => (
-                      <Box key={index} sx={{ mb: 1 }}>
-                        {risk}
-                      </Box>
+                      <Paper 
+                        key={index} 
+                        elevation={0}
+                        sx={{ 
+                          p: 2, 
+                          mb: 2, 
+                          bgcolor: 'error.light', 
+                          color: 'error.dark',
+                          borderRadius: 1
+                        }}
+                      >
+                        <Typography variant="body1">
+                          {risk}
+                        </Typography>
+                      </Paper>
                     ))}
-                  </Typography>
+                  </Box>
                 )}
                 {tabValue === 'outlook' && dashboardData.latest_summaries.outlook && (
-                  <Typography variant="body1">
-                    {dashboardData.latest_summaries.outlook}
-                  </Typography>
+                  <Paper 
+                    elevation={0} 
+                    sx={{ 
+                      p: 2, 
+                      bgcolor: 'info.light', 
+                      color: 'info.dark',
+                      borderRadius: 2 
+                    }}
+                  >
+                    <Typography variant="body1" sx={{ lineHeight: 1.7, textAlign: 'justify' }}>
+                      {dashboardData.latest_summaries.outlook}
+                    </Typography>
+                  </Paper>
                 )}
                 {tabValue === 'sentiment' && dashboardData.latest_summaries.sentiment && (
-                  <Typography variant="body1">
-                    {dashboardData.latest_summaries.sentiment}
-                  </Typography>
+                  <Paper 
+                    elevation={0} 
+                    sx={{ 
+                      p: 2, 
+                      bgcolor: dashboardData.latest_summaries.sentiment.includes('positive') ? 'success.light' : 
+                              dashboardData.latest_summaries.sentiment.includes('negative') ? 'error.light' : 'info.light',
+                      color: dashboardData.latest_summaries.sentiment.includes('positive') ? 'success.dark' : 
+                             dashboardData.latest_summaries.sentiment.includes('negative') ? 'error.dark' : 'info.dark',
+                      borderRadius: 2
+                    }}
+                  >
+                    <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
+                      {dashboardData.latest_summaries.sentiment.includes('positive') ? '😀 Positive' : 
+                       dashboardData.latest_summaries.sentiment.includes('negative') ? '😟 Negative' : '😐 Neutral'}
+                    </Typography>
+                    <Typography variant="body1" sx={{ lineHeight: 1.7 }}>
+                      {dashboardData.latest_summaries.sentiment}
+                    </Typography>
+                  </Paper>
                 )}
               </Box>
             </Paper>

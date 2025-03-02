@@ -237,9 +237,123 @@ async def compare_reports(
     comparison_request: ComparisonRequest,
     db: Session = Depends(get_db)
 ):
-    """Compare metrics between multiple reports."""
-    result = DBService.compare_reports(db, comparison_request)
-    return result
+    """Compare metrics and summaries between multiple reports."""
+    try:
+        # Validate report IDs
+        report_ids = comparison_request.report_ids
+        if len(report_ids) < 2:
+            raise HTTPException(status_code=400, detail="At least two reports are required for comparison")
+        
+        # Get reports data
+        reports_data = []
+        for report_id in report_ids:
+            report = DBService.get_report(db, report_id)
+            if not report:
+                raise HTTPException(status_code=404, detail=f"Report with ID {report_id} not found")
+            reports_data.append(report)
+        
+        # Get metrics for comparison
+        metrics_comparison = {}
+        for report in reports_data:
+            metrics = db.query(Metric).filter(Metric.report_id == report.id).all()
+            
+            # Filter metrics if specified
+            if comparison_request.metrics:
+                metrics = [m for m in metrics if m.name in comparison_request.metrics]
+            
+            # Organize metrics by name
+            for metric in metrics:
+                if metric.name not in metrics_comparison:
+                    metrics_comparison[metric.name] = {}
+                
+                metrics_comparison[metric.name][report.id] = {
+                    "value": metric.value,
+                    "unit": metric.unit,
+                    "year": report.year,
+                    "company_name": report.company.name if report.company else "Unknown"
+                }
+        
+        # Get summaries for comparison
+        summaries_comparison = {}
+        for report in reports_data:
+            summaries = DBService.get_summaries_by_report(db, report.id)
+            
+            # Organize summaries by category
+            report_summaries = {}
+            for summary in summaries:
+                report_summaries[summary.category] = summary.content
+            
+            summaries_comparison[report.id] = {
+                "summaries": report_summaries,
+                "year": report.year,
+                "company_name": report.company.name if report.company else "Unknown"
+            }
+        
+        # Generate AI comparison analysis if available
+        comparison_analysis = {}
+        try:
+            # Get the summaries for each report
+            report1_summaries = summaries_comparison[report_ids[0]]["summaries"]
+            report2_summaries = summaries_comparison[report_ids[1]]["summaries"]
+            
+            # Compare executive summaries
+            if "executive" in report1_summaries and "executive" in report2_summaries:
+                comparison_analysis["executive"] = await analysis_service.compare_texts(
+                    report1_summaries["executive"],
+                    report2_summaries["executive"],
+                    "Compare these two executive summaries and highlight key differences and similarities:"
+                )
+            
+            # Compare risk factors
+            if "risks" in report1_summaries and "risks" in report2_summaries:
+                comparison_analysis["risks"] = await analysis_service.compare_texts(
+                    report1_summaries["risks"],
+                    report2_summaries["risks"],
+                    "Compare these two risk assessments and identify which report presents higher risks:"
+                )
+            
+            # Compare business outlook
+            if "outlook" in report1_summaries and "outlook" in report2_summaries:
+                comparison_analysis["outlook"] = await analysis_service.compare_texts(
+                    report1_summaries["outlook"],
+                    report2_summaries["outlook"],
+                    "Compare these two business outlooks and determine which is more optimistic:"
+                )
+            
+            # Compare sentiment
+            if "sentiment" in report1_summaries and "sentiment" in report2_summaries:
+                comparison_analysis["sentiment"] = await analysis_service.compare_texts(
+                    report1_summaries["sentiment"],
+                    report2_summaries["sentiment"],
+                    "Compare these two sentiment analyses and determine which report has a more positive tone:"
+                )
+        except Exception as e:
+            logger.warning(f"Error generating AI comparison: {str(e)}")
+            comparison_analysis = {"error": str(e)}
+        
+        # Format the response
+        result = {
+            "reports": [
+                {
+                    "id": report.id,
+                    "company_id": report.company_id,
+                    "company_name": report.company.name if report.company else "Unknown",
+                    "year": report.year,
+                    "file_name": report.file_name
+                }
+                for report in reports_data
+            ],
+            "metrics_comparison": metrics_comparison,
+            "summaries_comparison": summaries_comparison,
+            "ai_analysis": comparison_analysis
+        }
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error comparing reports: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error comparing reports: {str(e)}")
 
 @router.get("/companies/{company_id}/metrics", response_model=Dict[str, List])
 async def get_company_metrics(

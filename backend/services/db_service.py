@@ -399,4 +399,51 @@ class DBService:
             return db.query(Report).order_by(desc(Report.upload_date)).limit(limit).all()
         except Exception as e:
             logger.error(f"Error getting recent reports: {str(e)}")
-            return [] 
+            return []
+    
+    @staticmethod
+    def get_company_metrics(db: Session, company_id: int, metric_names: Optional[List[str]] = None) -> Dict[str, List]:
+        """Get metrics for a specific company across all reports.
+        
+        Args:
+            db: Database session
+            company_id: ID of the company
+            metric_names: Optional list of metric names to filter by
+            
+        Returns:
+            Dictionary with metrics organized by year
+        """
+        try:
+            # Get all reports for the company
+            reports = db.query(Report).filter(Report.company_id == company_id).all()
+            
+            if not reports:
+                return {"metrics": []}
+            
+            # Get all metrics for these reports
+            metrics_data = []
+            for report in reports:
+                query = db.query(Metric).filter(Metric.report_id == report.id)
+                
+                # Apply metric name filter if provided
+                if metric_names:
+                    query = query.filter(Metric.name.in_(metric_names))
+                
+                report_metrics = query.all()
+                
+                # Add year to each metric
+                for metric in report_metrics:
+                    metrics_data.append({
+                        "id": metric.id,
+                        "name": metric.name,
+                        "value": metric.value,
+                        "unit": metric.unit,
+                        "category": metric.category,
+                        "year": report.year,
+                        "report_id": report.id
+                    })
+            
+            return {"metrics": metrics_data}
+        except Exception as e:
+            logger.error(f"Error getting company metrics: {str(e)}")
+            raise 

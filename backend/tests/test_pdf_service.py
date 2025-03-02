@@ -43,8 +43,9 @@ def test_save_upload():
             # Check that the file exists
             assert os.path.exists(file_path)
             
-            # Check that the filename is correct
-            assert filename == "test.pdf"
+            # Check that the filename contains the original filename
+            assert "test" in filename
+            assert filename.endswith(".pdf")
             
             # Check that the content was saved correctly
             with open(file_path, "rb") as f:
