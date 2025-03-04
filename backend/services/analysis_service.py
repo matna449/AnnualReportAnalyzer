@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 import PyPDF2
 import io
+import threading
+import traceback
 
 from services.pdf_service import PDFService
 from services.ai_service import AIService
@@ -41,47 +43,81 @@ class AnalysisService:
             Dictionary with analysis results
         """
         try:
+            logger.info(f"===== PIPELINE: INITIAL ANALYSIS STARTED - Report ID: {report_id} =====")
+            logger.info(f"PIPELINE: Thread ID: {threading.get_ident()}, Process ID: {os.getpid()}")
+            
             # Get the report
             report = DBService.get_report_by_id(db, report_id)
             if not report:
-                logger.error(f"Report with ID {report_id} not found")
+                logger.error(f"PIPELINE: ANALYSIS FAILED - Report with ID {report_id} not found")
                 return {"status": "error", "message": f"Report with ID {report_id} not found"}
             
             # Update report status
+            logger.info(f"PIPELINE: Updating report {report_id} status to 'processing'")
             DBService.update_report_status(db, report_id, "processing")
             
             # Read the PDF file
             file_path = report.file_path
+            logger.info(f"PIPELINE: Looking for PDF file at: {file_path}")
             if not os.path.exists(file_path):
-                logger.error(f"PDF file not found at path: {file_path}")
+                logger.error(f"PIPELINE: ANALYSIS FAILED - PDF file not found at path: {file_path}")
+                logger.error(f"PIPELINE: Current working directory: {os.getcwd()}")
+                logger.error(f"PIPELINE: Files in uploads directory: {os.listdir(os.path.dirname(file_path))}")
                 DBService.update_report_status(db, report_id, "failed")
                 return {"status": "error", "message": "PDF file not found"}
             
             try:
-                # Extract text from PDF
+                # Read the PDF file
+                logger.info(f"PIPELINE: Opening PDF file - Report ID: {report_id}")
                 with open(file_path, 'rb') as pdf_file:
+                    # Log file info
+                    file_size = os.path.getsize(file_path)
+                    logger.info(f"PIPELINE: PDF file size: {file_size} bytes - Report ID: {report_id}")
+                    
+                    logger.info(f"PIPELINE: Extracting text from PDF - Report ID: {report_id}")
+                    # Extract text from PDF
                     pdf_reader = PyPDF2.PdfReader(pdf_file)
                     page_count = len(pdf_reader.pages)
                     
                     # Update page count
                     report.page_count = page_count
                     db.commit()
+                    logger.info(f"PIPELINE: PDF has {page_count} pages - Report ID: {report_id}")
                     
                     # Extract text from each page
                     text = ""
                     for page_num in range(min(page_count, 100)):  # Limit to first 100 pages
+                        logger.info(f"PIPELINE: Extracting text from page {page_num+1}/{min(page_count, 100)} - Report ID: {report_id}")
                         page = pdf_reader.pages[page_num]
-                        text += page.extract_text() + "\n\n"
+                        page_text = page.extract_text()
+                        text += page_text + "\n\n"
+                        
+                        # Log page text sample for debugging
+                        if page_num < 2:  # Only log first few pages
+                            sample_text = page_text[:200] + "..." if len(page_text) > 200 else page_text
+                            logger.info(f"PIPELINE: Sample text from page {page_num+1}: {sample_text}")
+                
+                text_length = len(text)
+                logger.info(f"PIPELINE: Extracted {text_length} characters of text - Report ID: {report_id}")
+                
+                if text_length < 100:  # Sanity check for minimum text
+                    logger.error(f"PIPELINE: ANALYSIS WARNING - Extracted text is too short ({text_length} chars) - Report ID: {report_id}")
+                    logger.error(f"PIPELINE: First 100 chars of extracted text: {text[:100]}")
                 
                 # Analyze the text
+                logger.info(f"PIPELINE: Starting AI analysis - Report ID: {report_id}")
                 analysis_result = await self.analyze_report_text(text, report_id)
                 
                 # Store analysis results
+                logger.info(f"PIPELINE: Storing analysis results - Report ID: {report_id}")
+                logger.info(f"PIPELINE: Analysis result structure: {list(analysis_result.keys())}")
                 self._store_analysis_results(db, report_id, analysis_result)
                 
                 # Update report status
+                logger.info(f"PIPELINE: Updating report {report_id} status to 'completed'")
                 DBService.update_report_status(db, report_id, "completed")
                 
+                logger.info(f"===== PIPELINE: INITIAL ANALYSIS COMPLETE - Report ID: {report_id} =====")
                 return {
                     "status": "success",
                     "report_id": report_id,
@@ -89,17 +125,19 @@ class AnalysisService:
                 }
                 
             except Exception as e:
-                logger.error(f"Error processing PDF: {str(e)}")
+                logger.error(f"PIPELINE: ANALYSIS FAILED - Error processing PDF for report {report_id}: {str(e)}")
+                logger.error(f"PIPELINE: Exception details: {traceback.format_exc()}")
                 DBService.update_report_status(db, report_id, "failed")
                 return {"status": "error", "message": f"Error processing PDF: {str(e)}"}
             
         except Exception as e:
-            logger.error(f"Error analyzing report {report_id}: {str(e)}")
+            logger.error(f"PIPELINE: ANALYSIS FAILED - Unexpected error for report {report_id}: {str(e)}")
+            logger.error(f"PIPELINE: Exception details: {traceback.format_exc()}")
             try:
                 DBService.update_report_status(db, report_id, "failed")
-            except:
-                pass
-            return {"status": "error", "message": f"Error analyzing report: {str(e)}"}
+            except Exception as update_error:
+                logger.error(f"PIPELINE: ANALYSIS FAILED - Could not update report status for {report_id}: {str(update_error)}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
     
     async def process_report(
         self, 
@@ -244,36 +282,43 @@ class AnalysisService:
     async def analyze_report_text(self, text: str, report_id: int) -> Dict[str, Any]:
         """Analyze the text content of a report using AI services."""
         try:
-            logger.info(f"Starting AI analysis for report ID: {report_id}")
-            logger.info(f"Text length: {len(text)} characters")
+            logger.info(f"PIPELINE: AI ANALYSIS - Starting report {report_id} text analysis")
+            logger.info(f"PIPELINE: AI ANALYSIS - Text length: {len(text)} characters")
             
             # Log a sample of the text for debugging
             text_sample = text[:500] + "..." if len(text) > 500 else text
-            logger.debug(f"Text sample: {text_sample}")
+            logger.debug(f"PIPELINE: AI ANALYSIS - Text sample: {text_sample}")
             
             # Use the new comprehensive analyze_report method from AIService
             try:
-                logger.info("Starting comprehensive report analysis with FinBERT model...")
+                logger.info(f"PIPELINE: AI ANALYSIS - Using comprehensive analysis with FinBERT model")
                 analysis_result = self.ai_service.analyze_report(text)
                 
                 # Add report_id to the result
                 analysis_result["report_id"] = report_id
                 
                 # Log analysis results
-                logger.info(f"Analysis completed with status: {analysis_result.get('status', 'unknown')}")
-                logger.info(f"Extracted {len(analysis_result.get('metrics', []))} metrics")
-                logger.info(f"Extracted {len(analysis_result.get('risks', []))} risk factors")
-                logger.info(f"Sentiment: {analysis_result.get('sentiment', {}).get('sentiment', 'unknown')}")
+                logger.info(f"PIPELINE: AI ANALYSIS - Analysis completed with status: {analysis_result.get('status', 'unknown')}")
+                logger.info(f"PIPELINE: AI ANALYSIS - Metrics extracted: {len(analysis_result.get('metrics', []))}")
+                logger.info(f"PIPELINE: AI ANALYSIS - Risk factors extracted: {len(analysis_result.get('risks', []))}")
+                logger.info(f"PIPELINE: AI ANALYSIS - Sentiment: {analysis_result.get('sentiment', {}).get('sentiment', 'unknown')}")
+                
+                if analysis_result.get('status') == 'success':
+                    logger.info(f"PIPELINE: AI ANALYSIS - SUCCESS for report {report_id}")
+                else:
+                    logger.warning(f"PIPELINE: AI ANALYSIS - PARTIAL COMPLETION for report {report_id}")
                 
                 return analysis_result
                 
             except Exception as analysis_error:
-                logger.error(f"Error in comprehensive analysis: {str(analysis_error)}")
+                logger.error(f"PIPELINE: AI ANALYSIS - ERROR in comprehensive analysis for report {report_id}: {str(analysis_error)}")
+                logger.info(f"PIPELINE: AI ANALYSIS - Falling back to component analysis")
+                
                 # If the comprehensive analysis fails, try individual components
                 return self._fallback_component_analysis(text, report_id)
             
         except Exception as e:
-            logger.error(f"Critical error analyzing report text: {str(e)}")
+            logger.error(f"PIPELINE: AI ANALYSIS - CRITICAL ERROR for report {report_id}: {str(e)}")
             # Return a minimal result with error information
             return {
                 "report_id": report_id,

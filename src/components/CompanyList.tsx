@@ -119,16 +119,14 @@ const CompanyList: React.FC<CompanyListProps> = ({
                     />
                   </TableCell>
                   <TableCell align="right">
-                    <Link href={`/reports/${company.id}`} passHref>
-                      <Button 
-                        size="small" 
-                        variant="outlined" 
-                        startIcon={<Visibility />}
-                        component="a"
-                      >
-                        View
-                      </Button>
-                    </Link>
+                    <Button 
+                      size="small" 
+                      variant="outlined" 
+                      startIcon={<Visibility />}
+                      href={`/reports/${company.id}`}
+                    >
+                      View
+                    </Button>
                   </TableCell>
                 </TableRow>
               ))}

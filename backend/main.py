@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from api.routes import router
 from models.database import create_tables
+from middleware.log_streaming import setup_log_streaming
 
 # Configure logging
 logging.basicConfig(
@@ -46,6 +47,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add log streaming middleware
+setup_log_streaming(app)
+logger.info("Log streaming middleware initialized")
 
 # Include API routes
 app.include_router(router, prefix="/api")

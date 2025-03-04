@@ -5,6 +5,8 @@ from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime
 import os
+import time
+import re
 
 from models.database_session import get_db
 from models.schemas import (
@@ -83,111 +85,103 @@ async def upload_report(
     year: int = Form(...),
     ticker: Optional[str] = Form(None),
     sector: Optional[str] = Form(None),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db)
 ):
-    """Upload and process an annual report."""
-    logger.info(f"Received upload request for file: {file.filename}, company: {company_name}, year: {year}")
+    """
+    Upload a report and start analysis.
+    """
     try:
-        # Validate file type
-        if not file.filename or not file.filename.lower().endswith('.pdf'):
-            logger.warning(f"Invalid file type attempted: {file.filename}")
-            return JSONResponse(
+        logger.info(f"===== PIPELINE: UPLOAD STARTED =====")
+        
+        # Basic validation
+        if not file.filename.lower().endswith('.pdf'):
+            logger.warning(f"PIPELINE: UPLOAD REJECTED - File type not PDF: {file.filename}")
+            raise HTTPException(
                 status_code=400,
-                content={"detail": "Only PDF files are supported"}
+                detail="File must be a PDF"
             )
         
-        # Validate year
-        current_year = datetime.now().year
-        if year < 1900 or year > current_year + 1:
-            logger.warning(f"Invalid year provided: {year}")
-            return JSONResponse(
+        if not year or year < 1900 or year > datetime.now().year:
+            logger.warning(f"PIPELINE: UPLOAD REJECTED - Invalid year: {year}")
+            raise HTTPException(
                 status_code=400,
-                content={"detail": f"Year must be between 1900 and {current_year + 1}"}
+                detail="Year must be valid (between 1900 and current year)"
+            )
+            
+        if not company_name:
+            logger.warning(f"PIPELINE: UPLOAD REJECTED - Missing company name")
+            raise HTTPException(
+                status_code=400,
+                detail="Company name is required"
             )
         
-        # Validate company name
-        if not company_name or len(company_name.strip()) < 2:
-            logger.warning(f"Invalid company name: {company_name}")
-            return JSONResponse(
-                status_code=400,
-                content={"detail": "Company name is required and must be at least 2 characters"}
-            )
-        
-        logger.info(f"Processing upload: {file.filename} for company {company_name}, year {year}")
-        
-        # Create upload directory if it doesn't exist
-        upload_dir = os.path.join(os.getcwd(), "uploads")
-        os.makedirs(upload_dir, exist_ok=True)
-        
-        # Generate a unique filename
+        # Get or create company
+        logger.info(f"PIPELINE: Creating or retrieving company: {company_name}")
+        company = DBService.get_company_by_name(db, company_name)
+        if not company:
+            company = DBService.create_company(db, CompanyCreate(
+                name=company_name,
+                ticker=ticker,
+                sector=sector
+            ))
+            logger.info(f"PIPELINE: Created new company with ID {company.id}")
+        else:
+            logger.info(f"PIPELINE: Found existing company with ID {company.id}")
+            
+        # Save the file
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        safe_filename = f"{company_name.replace(' ', '_')}_{year}_{timestamp}.pdf"
-        file_path = os.path.join(upload_dir, safe_filename)
+        sanitized_name = re.sub(r'[^a-zA-Z0-9_]', '', company_name.replace(' ', '_'))
+        filename = f"{sanitized_name}_{year}_{timestamp}.pdf"
+        file_path = os.path.join("uploads", filename)
         
-        # Save the file using FileService
-        file_result = await FileService.save_uploaded_file(file, file_path)
+        # Create uploads directory if it doesn't exist
+        if not os.path.exists("uploads"):
+            os.makedirs("uploads")
+            
+        logger.info(f"PIPELINE: Saving PDF file to {file_path}")
+        with open(file_path, "wb") as buffer:
+            buffer.write(await file.read())
         
-        if not file_result["success"]:
-            logger.error(f"Error saving file: {file_result.get('error', 'Unknown error')}")
-            return JSONResponse(
-                status_code=500,
-                content={"detail": f"Error saving file: {file_result.get('error', 'Unknown error')}"}
-            )
+        # Create report
+        logger.info(f"PIPELINE: Creating report record for company {company.id}")
+        report_create = ReportCreate(
+            company_id=company.id,
+            year=str(year),
+            file_name=file.filename,
+            file_path=file_path,
+            processing_status="pending"
+        )
+        db_report = DBService.create_report(db, report_create)
+        logger.info(f"PIPELINE: Created report with ID {db_report.id}, status: pending")
         
-        # Process the report
-        try:
-            # Get company (create if not exists)
-            db_company = DBService.get_company_by_name(db, company_name)
-            if not db_company:
-                company_create = CompanyCreate(
-                    name=company_name,
-                    ticker=ticker,
-                    sector=sector
-                )
-                db_company = DBService.create_company(db, company_create)
-            
-            # Create report
-            report_create = ReportCreate(
-                company_id=db_company.id,
-                year=str(year),
-                file_name=file.filename,
-                file_path=file_path,
-                processing_status="pending"
-            )
-            db_report = DBService.create_report(db, report_create)
-            
-            # Start analysis in background
-            background_tasks = BackgroundTasks()
-            background_tasks.add_task(
-                analysis_service.analyze_report,
-                db=db,
-                report_id=db_report.id
-            )
-            
-            logger.info(f"Successfully uploaded report: {file.filename}, report_id: {db_report.id}")
-            
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "message": "Report uploaded successfully. Analysis started in background.",
-                    "report_id": db_report.id,
-                    "company_id": db_company.id,
-                    "status": "pending"
-                }
-            )
-        except Exception as e:
-            logger.error(f"Error processing report: {str(e)}")
-            # Clean up the file if there was an error
-            FileService.delete_file(file_path)
-            return JSONResponse(
-                status_code=500,
-                content={"detail": f"Error processing report: {str(e)}"}
-            )
+        # Start analysis in background
+        logger.info(f"PIPELINE: Starting background analysis task for report {db_report.id}")
+        background_tasks.add_task(
+            analysis_service.analyze_report,
+            db=db,
+            report_id=db_report.id
+        )
+        
+        logger.info(f"===== PIPELINE: UPLOAD COMPLETE - Report ID: {db_report.id} =====")
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "report_id": db_report.id,
+                "company_id": company.id,
+                "status": "pending",
+                "message": f"Report uploaded successfully. Analysis started in background."
+            }
+        )
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Unexpected error in upload: {str(e)}")
+        logger.error(f"PIPELINE: UPLOAD FAILED - {str(e)}")
         return JSONResponse(
             status_code=500,
-            content={"detail": f"Unexpected error: {str(e)}"}
+            content={"error": f"Error uploading file: {str(e)}"}
         )
 
 @router.get("/reports/")
@@ -539,17 +533,47 @@ def run_enhanced_analysis(
     This includes entity extraction, sentiment analysis, and risk assessment.
     """
     try:
+        logger.info(f"===== PIPELINE: ENHANCED ANALYSIS REQUEST - Report ID: {report_id} =====")
+        
         # Check if report exists
         report = DBService.get_report_by_id(db, report_id)
         if not report:
+            logger.error(f"PIPELINE: ENHANCED ANALYSIS FAILED - Report with ID {report_id} not found")
             raise HTTPException(status_code=404, detail=f"Report with ID {report_id} not found")
+        
+        # Check if the report has been successfully processed
+        if report.processing_status != "completed":
+            logger.error(f"PIPELINE: ENHANCED ANALYSIS FAILED - Report {report_id} has status '{report.processing_status}', not 'completed'")
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Report must be in 'completed' status to run enhanced analysis. Current status: {report.processing_status}"
+            )
         
         # Get report summaries
         summaries = DBService.get_summaries_by_report_id(db, report_id)
         if not summaries:
+            logger.error(f"PIPELINE: ENHANCED ANALYSIS FAILED - Report {report_id} has no summaries to analyze")
             raise HTTPException(status_code=400, detail="Report has no summaries to analyze")
         
+        logger.info(f"PIPELINE: Found {len(summaries)} summaries for report {report_id}")
+        
+        # Check if enhanced analysis already exists
+        existing_analysis = DBService.get_enhanced_analysis_by_report_id(db, report_id)
+        if existing_analysis and existing_analysis.get("status") == "success":
+            logger.info(f"PIPELINE: Enhanced analysis already exists for report {report_id}")
+            return {"status": "success", "message": "Enhanced analysis already exists", "report_id": report_id}
+        
+        # Update report status to indicate analysis in progress
+        try:
+            report.processing_status = "processing_enhanced_analysis"
+            db.commit()
+            logger.info(f"PIPELINE: Updated report {report_id} status to processing_enhanced_analysis")
+        except Exception as update_error:
+            logger.error(f"PIPELINE: Error updating report status for {report_id}: {str(update_error)}")
+            db.rollback()
+        
         # Run analysis in background
+        logger.info(f"PIPELINE: Starting background task for enhanced analysis of report {report_id}")
         background_tasks.add_task(
             process_enhanced_analysis,
             db=db,
@@ -557,12 +581,24 @@ def run_enhanced_analysis(
             summaries=summaries
         )
         
+        logger.info(f"PIPELINE: Enhanced analysis task scheduled for report {report_id}")
         return {"status": "success", "message": "Enhanced analysis started", "report_id": report_id}
     except HTTPException as e:
         # Re-raise HTTP exceptions
+        logger.error(f"PIPELINE: HTTP Exception in enhanced analysis for report {report_id}: {str(e)}")
         raise e
     except Exception as e:
-        logger.error(f"Error starting enhanced analysis for report {report_id}: {str(e)}")
+        logger.error(f"PIPELINE: Error starting enhanced analysis for report {report_id}: {str(e)}")
+        # Try to update report status to indicate error
+        try:
+            report = DBService.get_report_by_id(db, report_id)
+            if report:
+                report.processing_status = "error_enhanced_analysis"
+                db.commit()
+                logger.info(f"PIPELINE: Updated report {report_id} status to error_enhanced_analysis")
+        except Exception as update_error:
+            logger.error(f"PIPELINE: Error updating report status for {report_id}: {str(update_error)}")
+        
         return JSONResponse(
             status_code=500,
             content={"status": "error", "message": f"Error starting enhanced analysis: {str(e)}", "report_id": report_id}
@@ -598,62 +634,179 @@ def get_enhanced_analysis(
         "analysis": analysis
     }
 
-async def process_enhanced_analysis(db: Session, report_id: int, summaries: List[Summary]):
+def process_enhanced_analysis(db: Session, report_id: int, summaries: List[Dict[str, Any]]):
     """
-    Process enhanced analysis for a report.
+    Process enhanced analysis for a report using Hugging Face models.
+    This runs in the background and updates the report status when complete.
     """
+    logger.info(f"===== PIPELINE: ENHANCED ANALYSIS STARTED - Report ID: {report_id} =====")
+    
     try:
-        # Initialize HuggingFace service
-        hf_service = HuggingFaceService()
-        
-        # Combine summaries into a single text for analysis
-        text = ""
+        # Combine all summary texts
+        text_to_analyze = ""
         for summary in summaries:
-            text += f"\n\n{summary.category.upper()}:\n{summary.content}"
+            if summary.get("content"):
+                text_to_analyze += f"{summary.get('content', '')} "
         
-        logger.info(f"Starting enhanced analysis for report {report_id} with text length: {len(text)}")
+        if not text_to_analyze:
+            logger.error(f"PIPELINE: ENHANCED ANALYSIS FAILED - No summary text found for report {report_id}")
+            report = DBService.get_report_by_id(db, report_id)
+            if report:
+                report.processing_status = "error_enhanced_analysis"
+                db.commit()
+            return
         
-        # Run analysis
+        logger.info(f"PIPELINE: Combined {len(summaries)} summaries for report {report_id}, total length: {len(text_to_analyze)} chars")
+        
+        # Get the HuggingFaceService instance and analyze the text
+        huggingface_service = HuggingFaceService()
+        
+        logger.info(f"PIPELINE: Running entity extraction for report {report_id}")
+        # Run entity extraction
+        entity_result = huggingface_service.extract_entities(text_to_analyze)
+        if not entity_result or entity_result.get("status") != "success":
+            logger.error(f"PIPELINE: Entity extraction failed for report {report_id}: {entity_result}")
+            
+        logger.info(f"PIPELINE: Running sentiment analysis for report {report_id}")
+        # Run sentiment analysis
+        sentiment_result = huggingface_service.analyze_sentiment(text_to_analyze)
+        if not sentiment_result or sentiment_result.get("status") != "success":
+            logger.error(f"PIPELINE: Sentiment analysis failed for report {report_id}: {sentiment_result}")
+            
+        logger.info(f"PIPELINE: Running risk analysis for report {report_id}")
+        # Run risk analysis
+        risk_result = huggingface_service.analyze_risk(text_to_analyze)
+        if not risk_result or risk_result.get("status") != "success":
+            logger.error(f"PIPELINE: Risk analysis failed for report {report_id}: {risk_result}")
+        
+        # Combine the results
+        enhanced_analysis = {
+            "status": "success",
+            "report_id": report_id,
+            "timestamp": datetime.now().isoformat(),
+            "entities": entity_result.get("entities", []) if entity_result and entity_result.get("status") == "success" else [],
+            "sentiment": sentiment_result.get("sentiment", {}) if sentiment_result and sentiment_result.get("status") == "success" else {},
+            "risk_factors": risk_result.get("risk_factors", []) if risk_result and risk_result.get("status") == "success" else []
+        }
+        
+        has_error = False
+        
+        # Log result summaries
+        if len(enhanced_analysis["entities"]) > 0:
+            logger.info(f"PIPELINE: Extracted {len(enhanced_analysis['entities'])} entities for report {report_id}")
+        else:
+            logger.warning(f"PIPELINE: No entities were extracted for report {report_id}")
+            has_error = True
+            
+        if enhanced_analysis["sentiment"]:
+            logger.info(f"PIPELINE: Sentiment analysis complete for report {report_id}: {enhanced_analysis['sentiment']}")
+        else:
+            logger.warning(f"PIPELINE: No sentiment data was generated for report {report_id}")
+            has_error = True
+            
+        if len(enhanced_analysis["risk_factors"]) > 0:
+            logger.info(f"PIPELINE: Extracted {len(enhanced_analysis['risk_factors'])} risk factors for report {report_id}")
+        else:
+            logger.warning(f"PIPELINE: No risk factors were extracted for report {report_id}")
+            has_error = True
+        
+        # Store the enhanced analysis
         try:
-            analysis_results = hf_service.analyze_financial_text(text)
-            logger.info(f"Analysis completed for report {report_id}")
-        except Exception as analysis_error:
-            logger.error(f"Error in HuggingFace analysis for report {report_id}: {str(analysis_error)}")
-            # Use fallback analysis
-            analysis_results = {
-                "entities": {"entities": {}},
-                "sentiment": {
-                    "sentiment": "neutral",
-                    "score": 0.5,
-                    "sentiment_distribution": {"positive": 0.33, "neutral": 0.34, "negative": 0.33}
-                },
-                "risk": {
-                    "overall_risk_score": 0.5,
-                    "risk_categories": {"market_risk": 0.5, "operational_risk": 0.5},
-                    "primary_risk_factors": ["Unable to analyze risk factors due to API error"]
-                },
-                "insights": {
-                    "overall": "Analysis could not be completed due to API limitations. Please try again later.",
-                    "sentiment": "Sentiment analysis could not be completed.",
-                    "risk": "Risk assessment could not be completed."
-                }
-            }
-        
-        # Store results
-        try:
-            result_ids = DBService.store_enhanced_analysis(db, report_id, analysis_results)
-            logger.info(f"Enhanced analysis stored for report {report_id}: {result_ids}")
-        except Exception as db_error:
-            logger.error(f"Error storing enhanced analysis for report {report_id}: {str(db_error)}")
-            raise
-        
+            logger.info(f"PIPELINE: Storing enhanced analysis for report {report_id}")
+            DBService.store_enhanced_analysis(db, report_id, enhanced_analysis)
+            
+            # Update report status
+            report = DBService.get_report_by_id(db, report_id)
+            if report:
+                if has_error:
+                    report.processing_status = "completed_with_warnings"
+                    logger.warning(f"PIPELINE: Enhanced analysis completed with warnings for report {report_id}")
+                else:
+                    report.processing_status = "completed"
+                    logger.info(f"PIPELINE: Enhanced analysis completed successfully for report {report_id}")
+                db.commit()
+                
+            logger.info(f"===== PIPELINE: ENHANCED ANALYSIS COMPLETE - Report ID: {report_id} =====")
+            
+        except Exception as store_error:
+            logger.error(f"PIPELINE: Error storing enhanced analysis for report {report_id}: {str(store_error)}")
+            # Try to update report status to indicate error
+            try:
+                report = DBService.get_report_by_id(db, report_id)
+                if report:
+                    report.processing_status = "error_enhanced_analysis"
+                    db.commit()
+            except Exception as update_error:
+                logger.error(f"PIPELINE: Error updating report status for {report_id}: {str(update_error)}")
+    
     except Exception as e:
-        logger.error(f"Error processing enhanced analysis for report {report_id}: {str(e)}")
-        # Update report status to indicate error
+        logger.error(f"PIPELINE: Error during enhanced analysis for report {report_id}: {str(e)}")
+        # Try to update report status to indicate error
         try:
             report = DBService.get_report_by_id(db, report_id)
             if report:
                 report.processing_status = "error_enhanced_analysis"
                 db.commit()
+                logger.info(f"PIPELINE: Updated report {report_id} status to error_enhanced_analysis")
         except Exception as update_error:
-            logger.error(f"Error updating report status for {report_id}: {str(update_error)}") 
+            logger.error(f"PIPELINE: Error updating report status for {report_id}: {str(update_error)}") 
+
+@router.get("/reports/{report_id}/status", response_model=Dict[str, Any])
+def get_report_status(
+    report_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Get the processing status of a report.
+    """
+    try:
+        logger.info(f"PIPELINE: Checking status for report {report_id}")
+        
+        # Get the report from the database
+        report = DBService.get_report_by_id(db, report_id)
+        if not report:
+            logger.error(f"PIPELINE: Status check failed - Report with ID {report_id} not found")
+            raise HTTPException(status_code=404, detail=f"Report with ID {report_id} not found")
+        
+        # Get the current timestamp
+        current_time = datetime.now()
+        
+        # If still processing after 10 minutes, consider it as failed
+        if report.processing_status in ['pending', 'processing'] and report.upload_date:
+            time_elapsed = (current_time - report.upload_date).total_seconds() / 60
+            
+            if time_elapsed > 10:  # If more than 10 minutes
+                logger.warning(f"PIPELINE: Report {report_id} processing timeout after {time_elapsed:.1f} minutes, marking as failed")
+                report.processing_status = "failed"
+                db.commit()
+        
+        logger.info(f"PIPELINE: Report {report_id} status check: {report.processing_status}")
+        
+        # Safely get the last_updated field
+        last_updated = None
+        try:
+            if hasattr(report, 'last_updated') and report.last_updated:
+                last_updated = report.last_updated.isoformat()
+        except AttributeError as e:
+            logger.warning(f"PIPELINE: Could not access last_updated field for report {report_id}: {str(e)}")
+        
+        # Return the status information
+        return {
+            "status": report.processing_status,
+            "report_id": report_id,
+            "company_name": report.company.name if report.company else None,
+            "year": report.year,
+            "upload_date": report.upload_date.isoformat() if report.upload_date else None,
+            "last_updated": last_updated
+        }
+    
+    except HTTPException as e:
+        logger.error(f"PIPELINE: HTTP exception in status check for report {report_id}: {str(e)}")
+        raise
+    
+    except Exception as e:
+        logger.error(f"PIPELINE: Error getting status for report {report_id}: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": f"Error getting report status: {str(e)}"}
+        ) 

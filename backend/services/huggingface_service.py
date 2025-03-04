@@ -20,30 +20,37 @@ class HuggingFaceService:
     def __init__(self):
         self.api_key = os.getenv("HUGGINGFACE_API_KEY")
         
+        # PDF service for using shared chunking functionality
+        from services.pdf_service import PDFService
+        self.pdf_service = PDFService()
+        
         # Model URLs - Updated with working models
         self.sentiment_model_url = "https://api-inference.huggingface.co/models/yiyanghkust/finbert-tone"
         self.finbert_model_url = "https://api-inference.huggingface.co/models/ProsusAI/finbert"  # Financial BERT model
         self.risk_model_url = "https://api-inference.huggingface.co/models/ProsusAI/finbert"  # Same model for risk analysis
         
-        # Chunking parameters
+        # Chunking parameters - adjusted for BERT model limits
         self.max_tokens = 512  # Maximum tokens per chunk for BERT models
         self.overlap_tokens = 50  # Overlap between chunks
         
         # Validate API key
         self.is_api_key_valid = self._validate_api_key()
+        logger.info(f"HUGGINGFACE: Service initialized. API key valid: {self.is_api_key_valid}")
         
     def _validate_api_key(self) -> bool:
         """Validate the Hugging Face API key."""
+        logger.info("HUGGINGFACE: Validating API key")
+        
         if not self.api_key:
-            logger.warning("No Hugging Face API key provided in environment variables.")
+            logger.warning("HUGGINGFACE: No API key provided in environment variables")
             return False
             
         if len(self.api_key) < 8:  # Basic length check
-            logger.warning("Hugging Face API key appears to be invalid (too short).")
+            logger.warning("HUGGINGFACE: API key appears to be invalid (too short)")
             return False
             
         # Skip actual validation to avoid timeouts during testing
-        logger.info("Skipping API key validation to avoid timeouts. Assuming key is valid.")
+        logger.info("HUGGINGFACE: Skipping API key validation to avoid timeouts. Assuming key is valid.")
         return True
         
         # Uncomment the following code for production use
@@ -77,70 +84,61 @@ class HuggingFaceService:
     
     def _call_api(self, model_url: str, text: str, max_retries: int = 3) -> Dict[str, Any]:
         """
-        Make a call to a Hugging Face model API with retry logic.
+        Call the Hugging Face API with exponential backoff for retries.
         
         Args:
-            model_url: URL of the Hugging Face model
+            model_url: URL of the model to call
             text: Text to analyze
             max_retries: Maximum number of retries
             
         Returns:
-            API response as a dictionary
+            Dictionary with API response
         """
-        # For testing purposes, return a mock response if no valid API key
-        if not self.api_key:
-            logger.warning("No API key provided. Using mock response for testing.")
+        if not self.is_api_key_valid:
+            logger.warning("HUGGINGFACE: API call attempted but API key is invalid or missing")
             return self._get_mock_response(model_url, text)
-        
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        
+            
+        headers = {"Authorization": f"Bearer {self.api_key}"}
         payload = {"inputs": text}
         
-        logger.info(f"Calling Hugging Face API ({model_url.split('/')[-1]}) with {len(text)} characters")
+        retry_count = 0
         
-        for attempt in range(max_retries):
+        while retry_count < max_retries:
             try:
-                response = requests.post(
-                    model_url,
-                    headers=headers, 
-                    json=payload, 
-                    timeout=30
-                )
+                logger.info(f"HUGGINGFACE: Calling API - Model: {model_url.split('/')[-1]}, Text length: {len(text)} chars")
+                response = requests.post(model_url, headers=headers, json=payload)
                 
                 if response.status_code == 200:
-                    return response.json()
-                elif response.status_code == 429:
-                    # Rate limit exceeded, wait and retry
-                    wait_time = min(2 ** attempt, 60)  # Exponential backoff
-                    logger.warning(f"Rate limit exceeded. Waiting {wait_time}s before retry.")
+                    result = response.json()
+                    logger.info(f"HUGGINGFACE: API call successful - Model: {model_url.split('/')[-1]}")
+                    return result
+                
+                # Handle error cases
+                if response.status_code == 503:
+                    retry_count += 1
+                    wait_time = min(2 ** retry_count, 60)  # Exponential backoff, max 60 seconds
+                    logger.warning(f"HUGGINGFACE: API temporarily unavailable (503). Retrying in {wait_time}s (attempt {retry_count}/{max_retries})")
                     time.sleep(wait_time)
-                elif response.status_code == 503:
-                    # Model is loading, wait and retry
-                    wait_time = min(2 ** attempt, 60)
-                    logger.warning(f"Model is loading. Waiting {wait_time}s before retry.")
-                    time.sleep(wait_time)
-                elif response.status_code in (401, 403):
-                    # Authentication error
-                    logger.error(f"Authentication error: {response.status_code}")
-                    # Return mock response for testing
-                    return self._get_mock_response(model_url, text)
-                else:
-                    logger.error(f"API request failed with status {response.status_code}: {response.text}")
-                    if attempt == max_retries - 1:
-                        # Return mock response on final attempt
-                        return self._get_mock_response(model_url, text)
-                    time.sleep(1)
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Request error on attempt {attempt+1}: {str(e)}")
-                if attempt == max_retries - 1:
-                    # Return mock response on final attempt
-                    return self._get_mock_response(model_url, text)
-                time.sleep(1)
+                    continue
+                
+                logger.error(f"HUGGINGFACE: API error - Status: {response.status_code}, Response: {response.text}")
+                
+                # For other HTTP errors, just return a mock response
+                return self._get_mock_response(model_url, text)
+                
+            except Exception as e:
+                retry_count += 1
+                wait_time = min(2 ** retry_count, 60)
+                logger.error(f"HUGGINGFACE: Exception during API call: {str(e)}. Retrying in {wait_time}s (attempt {retry_count}/{max_retries})")
+                
+                if retry_count >= max_retries:
+                    logger.error(f"HUGGINGFACE: Max retries reached. Falling back to mock response.")
+                    break
+                    
+                time.sleep(wait_time)
         
-        # If we get here, all attempts failed
+        # If we've exhausted retries, use the mock response
+        logger.warning(f"HUGGINGFACE: Using mock response after {max_retries} failed API attempts")
         return self._get_mock_response(model_url, text)
         
     def _get_mock_response(self, model_url: str, text: str) -> Dict[str, Any]:
@@ -197,7 +195,7 @@ class HuggingFaceService:
     
     def _chunk_text(self, text: str) -> List[str]:
         """
-        Split text into chunks suitable for BERT models.
+        Split text into chunks suitable for BERT models by utilizing PDFService's chunking.
         
         Args:
             text: Text to split
@@ -205,33 +203,13 @@ class HuggingFaceService:
         Returns:
             List of text chunks
         """
-        # Simple chunking by paragraphs
-        paragraphs = re.split(r'\n\s*\n', text)
+        # Use PDFService's chunking method with BERT-appropriate size limits
+        # Approximating token count as characters/4 for English text
+        chunk_size = self.max_tokens * 4  # Rough token-to-character conversion
+        overlap = self.overlap_tokens * 4  # Overlap in characters
         
-        chunks = []
-        current_chunk = ""
-        
-        for paragraph in paragraphs:
-            # Skip empty paragraphs
-            if not paragraph.strip():
-                continue
-                
-            # If adding this paragraph would exceed max tokens, start a new chunk
-            if len(current_chunk) + len(paragraph) > self.max_tokens * 4:  # Rough approximation
-                if current_chunk:
-                    chunks.append(current_chunk)
-                current_chunk = paragraph
-            else:
-                if current_chunk:
-                    current_chunk += "\n\n" + paragraph
-                else:
-                    current_chunk = paragraph
-        
-        # Add the last chunk if not empty
-        if current_chunk:
-            chunks.append(current_chunk)
-            
-        logger.info(f"Split text into {len(chunks)} chunks")
+        chunks = self.pdf_service.chunk_text(text, chunk_size=chunk_size, overlap=overlap)
+        logger.info(f"Split text into {len(chunks)} chunks using PDFService chunker")
         return chunks
         
     def analyze_sentiment(self, text: str) -> Dict[str, Any]:
@@ -255,140 +233,77 @@ class HuggingFaceService:
             negative_count = sum(1 for keyword in negative_keywords if keyword in text.lower())
             positive_count = sum(1 for keyword in positive_keywords if keyword in text.lower())
             
-            # Split text into chunks if needed
-            if len(text) > 1000:  # Arbitrary threshold for chunking
-                chunks = self._chunk_text(text)
-                logger.info(f"Analyzing sentiment for {len(chunks)} text chunks")
-                
-                # Process each chunk
-                results = []
-                for i, chunk in enumerate(chunks):
-                    logger.info(f"Processing chunk {i+1}/{len(chunks)}")
-                    try:
-                        chunk_result = self._call_api(self.sentiment_model_url, chunk)
-                        # Handle nested list structure
-                        if isinstance(chunk_result, list):
-                            for item in chunk_result:
-                                if isinstance(item, list):
-                                    results.extend(item)
-                                else:
-                                    results.append(item)
-                    except Exception as e:
-                        logger.error(f"Error processing chunk {i+1}: {str(e)}")
-                
-                # Aggregate results
-                if not results:
-                    return self._fallback_sentiment_analysis(text)
-                
-                # Count sentiment labels
-                sentiment_counts = {"positive": 0, "negative": 0, "neutral": 0}
-                total_score = 0
-                
-                for result in results:
-                    if isinstance(result, dict):
-                        # Handle both lowercase and capitalized labels
-                        label = result.get('label', '')
-                        if label:
-                            label = label.lower()  # Convert to lowercase
-                            score = result.get('score', 0)
-                            
-                            if label in sentiment_counts:
-                                sentiment_counts[label] += 1
-                                total_score += score
-                
-                # Determine overall sentiment
-                if sum(sentiment_counts.values()) == 0:
-                    return self._fallback_sentiment_analysis(text)
-                else:
-                    # Use keyword counts to break ties or adjust sentiment
-                    if sentiment_counts["positive"] == sentiment_counts["negative"]:
-                        if negative_count > positive_count:
-                            overall_sentiment = "negative"
-                        elif positive_count > negative_count:
-                            overall_sentiment = "positive"
-                        else:
-                            overall_sentiment = "neutral"
-                    else:
-                        overall_sentiment = max(sentiment_counts.items(), key=lambda x: x[1])[0]
-                    
-                    # Override with keyword analysis if strong signal
-                    if negative_count > positive_count + 2:  # Strong negative signal
-                        overall_sentiment = "negative"
-                    elif positive_count > negative_count + 2:  # Strong positive signal
-                        overall_sentiment = "positive"
-                    
-                    avg_score = total_score / sum(sentiment_counts.values()) if sum(sentiment_counts.values()) > 0 else 0
-                
-                return {
-                    "sentiment": overall_sentiment,
-                    "score": avg_score,
-                    "chunk_count": len(chunks),
-                    "processed_chunks": len(results),
-                    "sentiment_distribution": sentiment_counts,
-                    "keyword_analysis": {"negative": negative_count, "positive": positive_count}
-                }
+            # Always chunk the text using the standardized method
+            chunks = self._chunk_text(text)
+            logger.info(f"Analyzing sentiment for {len(chunks)} text chunks")
+            
+            # Process each chunk
+            results = []
+            for i, chunk in enumerate(chunks):
+                logger.info(f"Processing chunk {i+1}/{len(chunks)}")
+                try:
+                    chunk_result = self._call_api(self.sentiment_model_url, chunk)
+                    # Handle nested list structure
+                    if isinstance(chunk_result, list):
+                        for item in chunk_result:
+                            if isinstance(item, list):
+                                results.extend(item)
+                            else:
+                                results.append(item)
+                except Exception as e:
+                    logger.error(f"Error processing chunk {i+1}: {str(e)}")
+            
+            # Aggregate results
+            if not results:
+                return self._fallback_sentiment_analysis(text)
+            
+            # Count sentiment labels
+            sentiment_counts = {"positive": 0, "negative": 0, "neutral": 0}
+            total_score = 0
+            
+            for result in results:
+                if isinstance(result, dict):
+                    # Handle both lowercase and capitalized labels
+                    label = result.get('label', '')
+                    if label:
+                        label = label.lower()  # Convert to lowercase
+                        score = result.get('score', 0)
+                        
+                        if label in sentiment_counts:
+                            sentiment_counts[label] += 1
+                            total_score += score
+            
+            # Determine overall sentiment
+            if sum(sentiment_counts.values()) == 0:
+                return self._fallback_sentiment_analysis(text)
             else:
-                # Process single chunk
-                result = self._call_api(self.sentiment_model_url, text)
-                
-                # Handle nested list structure
-                flattened_results = []
-                if isinstance(result, list):
-                    for item in result:
-                        if isinstance(item, list):
-                            flattened_results.extend(item)
-                        else:
-                            flattened_results.append(item)
-                else:
-                    flattened_results = [result]
-                
-                # Process all items in the flattened list
-                sentiment_counts = {"positive": 0, "negative": 0, "neutral": 0}
-                total_score = 0
-                
-                for item in flattened_results:
-                    if isinstance(item, dict):
-                        # Handle both lowercase and capitalized labels
-                        label = item.get('label', '')
-                        if label:
-                            label = label.lower()  # Convert to lowercase
-                            score = item.get('score', 0.0)
-                            
-                            if label in sentiment_counts:
-                                sentiment_counts[label] += 1
-                                total_score += score
-                
-                if sum(sentiment_counts.values()) > 0:
-                    # Use keyword counts to break ties or adjust sentiment
-                    if sentiment_counts["positive"] == sentiment_counts["negative"]:
-                        if negative_count > positive_count:
-                            overall_sentiment = "negative"
-                        elif positive_count > negative_count:
-                            overall_sentiment = "positive"
-                        else:
-                            overall_sentiment = "neutral"
-                    else:
-                        overall_sentiment = max(sentiment_counts.items(), key=lambda x: x[1])[0]
-                    
-                    # Override with keyword analysis if strong signal
-                    if negative_count > positive_count + 2:  # Strong negative signal
+                # Use keyword counts to break ties or adjust sentiment
+                if sentiment_counts["positive"] == sentiment_counts["negative"]:
+                    if negative_count > positive_count:
                         overall_sentiment = "negative"
-                    elif positive_count > negative_count + 2:  # Strong positive signal
+                    elif positive_count > negative_count:
                         overall_sentiment = "positive"
-                    
-                    avg_score = total_score / sum(sentiment_counts.values())
-                    
-                    return {
-                        "sentiment": overall_sentiment,
-                        "score": avg_score,
-                        "chunk_count": 1,
-                        "processed_chunks": 1,
-                        "sentiment_distribution": sentiment_counts,
-                        "keyword_analysis": {"negative": negative_count, "positive": positive_count}
-                    }
+                    else:
+                        overall_sentiment = "neutral"
                 else:
-                    logger.warning(f"No valid sentiment labels found in response: {result}")
-                    return self._fallback_sentiment_analysis(text)
+                    overall_sentiment = max(sentiment_counts.items(), key=lambda x: x[1])[0]
+                
+                # Override with keyword analysis if strong signal
+                if negative_count > positive_count + 2:  # Strong negative signal
+                    overall_sentiment = "negative"
+                elif positive_count > negative_count + 2:  # Strong positive signal
+                    overall_sentiment = "positive"
+                
+                avg_score = total_score / sum(sentiment_counts.values()) if sum(sentiment_counts.values()) > 0 else 0
+            
+            return {
+                "sentiment": overall_sentiment,
+                "score": avg_score,
+                "chunk_count": len(chunks),
+                "processed_chunks": len(results),
+                "sentiment_distribution": sentiment_counts,
+                "keyword_analysis": {"negative": negative_count, "positive": positive_count}
+            }
         except Exception as e:
             logger.error(f"Error analyzing sentiment: {str(e)}")
             return self._fallback_sentiment_analysis(text)

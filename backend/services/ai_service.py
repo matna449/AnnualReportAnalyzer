@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 class AIService:
     def __init__(self):
         self.huggingface_api_key = os.getenv("HUGGINGFACE_API_KEY")
+        # Import and initialize HuggingFaceService
+        from services.huggingface_service import HuggingFaceService
+        self.huggingface_service = HuggingFaceService()
+        
         # Add task parameter to the URL to specify sentiment-analysis
         self.finbert_model_url = "https://api-inference.huggingface.co/models/matna449/my-finbert"
         self.finbert_model_url_with_task = f"{self.finbert_model_url}?task=sentiment-analysis"
@@ -189,47 +193,21 @@ class AIService:
         return chunks
     
     def analyze_sentiment(self, text: str) -> Dict[str, Any]:
-        """Analyze sentiment in text using FinBERT model or fallback method."""
+        """Analyze sentiment in financial text."""
         try:
-            if self.is_api_key_valid:
-                # Use only the first 1000 characters for sentiment analysis
-                # This is typically enough for overall sentiment and avoids token limits
-                limited_text = text[:1000]
-                
-                # Call FinBERT API
-                response = self._call_finbert_api(limited_text)
-                
-                # Process FinBERT response
-                # Expected format: [{'label': 'positive/negative/neutral', 'score': 0.XXX}]
-                if isinstance(response, list) and len(response) > 0:
-                    # Get the first prediction (highest confidence)
-                    prediction = response[0]
-                    sentiment = prediction.get('label', 'neutral').lower()
-                    score = prediction.get('score', 0.0)
-                    
-                    # Format explanation based on confidence score
-                    if score > 0.8:
-                        confidence = "high"
-                    elif score > 0.6:
-                        confidence = "moderate"
-                    else:
-                        confidence = "low"
-                        
-                    explanation = f"FinBERT model detected {sentiment} sentiment with {confidence} confidence ({score:.2f})."
-                    
-                    return {
-                        "sentiment": sentiment,
-                        "explanation": explanation,
-                        "score": score
-                    }
-                else:
-                    logger.warning(f"Unexpected FinBERT response format: {response}")
-                    return self._fallback_sentiment_analysis(text)
-            else:
-                # Fallback to simple keyword-based sentiment analysis
+            logger.info(f"Analyzing sentiment in text ({len(text)} characters)")
+            
+            try:
+                # Use HuggingFaceService to perform sentiment analysis
+                sentiment_result = self.huggingface_service.analyze_sentiment(text)
+                logger.info(f"Sentiment analysis completed: {sentiment_result['sentiment']}")
+                return sentiment_result
+            except Exception as e:
+                logger.error(f"Error calling HuggingFaceService for sentiment analysis: {str(e)}")
                 return self._fallback_sentiment_analysis(text)
+                
         except Exception as e:
-            logger.error(f"Error analyzing sentiment with FinBERT: {str(e)}")
+            logger.error(f"Error in sentiment analysis: {str(e)}")
             return self._fallback_sentiment_analysis(text)
     
     def _fallback_sentiment_analysis(self, text: str) -> Dict[str, Any]:
@@ -894,7 +872,8 @@ class AIService:
             "risks": False,
             "executive_summary": False,
             "business_outlook": False,
-            "sentiment": False
+            "sentiment": False,
+            "entities": False
         }
         
         # Split text into chunks for processing
@@ -906,21 +885,11 @@ class AIService:
         try:
             metrics = self.extract_financial_metrics(text)
             logger.info(f"Extracted {len(metrics)} financial metrics")
-            
-            # Deduplicate metrics by name
-            unique_metrics = {}
-            for metric in metrics:
-                name = metric.get("name", "").lower()
-                if name and (name not in unique_metrics or 
-                           float(metric.get("value", 0)) > float(unique_metrics[name].get("value", 0))):
-                    unique_metrics[name] = metric
-            
-            metrics = list(unique_metrics.values())
         except Exception as e:
             logger.error(f"Error extracting financial metrics: {str(e)}")
             component_errors["metrics"] = True
         
-        # Extract risk factors (from middle chunks)
+        # Extract risk factors
         risks = []
         try:
             risks = self.extract_risk_factors(text)
@@ -933,7 +902,7 @@ class AIService:
         executive_summary = ""
         try:
             executive_summary = self.generate_summary(text, "executive")
-            logger.info(f"Generated executive summary ({len(executive_summary)} characters)")
+            logger.info(f"Generated executive summary: {len(executive_summary)} characters")
         except Exception as e:
             logger.error(f"Error generating executive summary: {str(e)}")
             component_errors["executive_summary"] = True
@@ -941,41 +910,51 @@ class AIService:
         # Generate business outlook
         business_outlook = ""
         try:
-            business_outlook = self.generate_summary(text, "business")
-            logger.info(f"Generated business outlook ({len(business_outlook)} characters)")
+            business_outlook = self.generate_business_outlook(text)
+            logger.info(f"Generated business outlook: {len(business_outlook)} characters")
         except Exception as e:
             logger.error(f"Error generating business outlook: {str(e)}")
             component_errors["business_outlook"] = True
         
-        # Analyze sentiment (based on executive summary)
-        sentiment = {"sentiment": "neutral", "explanation": "Unable to determine sentiment"}
+        # Analyze sentiment
+        sentiment = {}
         try:
-            sentiment = self.analyze_sentiment(executive_summary or text[:1000])
-            logger.info(f"Analyzed sentiment: {sentiment['sentiment']}")
+            sentiment = self.huggingface_service.analyze_sentiment(text)
+            logger.info(f"Sentiment analysis completed: {sentiment.get('sentiment', 'unknown')}")
         except Exception as e:
             logger.error(f"Error analyzing sentiment: {str(e)}")
             component_errors["sentiment"] = True
+            sentiment = self._fallback_sentiment_analysis(text)
         
-        # Determine overall status
-        status = "success"
-        message = "Analysis completed successfully"
+        # Extract entities using HuggingFaceService
+        entities = {}
+        try:
+            entity_results = self.huggingface_service.extract_entities(text)
+            entities = entity_results.get('entities', {})
+            logger.info(f"Entity extraction completed")
+        except Exception as e:
+            logger.error(f"Error extracting entities: {str(e)}")
+            component_errors["entities"] = True
         
-        if all(component_errors.values()):
-            status = "error"
-            message = "All analysis components failed"
-        elif any(component_errors.values()):
-            status = "partial"
-            failed_components = [comp for comp, failed in component_errors.items() if failed]
-            message = f"Partial analysis completed. Failed components: {', '.join(failed_components)}"
+        # Process risk analysis
+        risk_analysis = {}
+        try:
+            risk_analysis = self.huggingface_service.analyze_risk(text)
+            logger.info(f"Risk analysis completed")
+        except Exception as e:
+            logger.error(f"Error in risk analysis: {str(e)}")
         
+        # Return analysis results
         return {
-            "status": status,
-            "message": message,
+            "status": "success" if not any(component_errors.values()) else "partial",
             "metrics": metrics,
             "risks": risks,
             "executive_summary": executive_summary,
             "business_outlook": business_outlook,
-            "sentiment": sentiment
+            "sentiment": sentiment,
+            "entities": entities,
+            "risk": risk_analysis,
+            "errors": [k for k, v in component_errors.items() if v]
         }
     
     def analyze_report(self, report_text: str) -> Dict[str, Any]:

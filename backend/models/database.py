@@ -38,6 +38,7 @@ class Report(Base):
     upload_date = Column(DateTime, default=datetime.utcnow)
     processing_status = Column(String(20), default="pending")  # pending, processing, completed, failed
     page_count = Column(Integer, nullable=True)
+    last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)
     
     # Relationships
     company = relationship("Company", back_populates="reports")
