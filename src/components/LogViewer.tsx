@@ -21,6 +21,7 @@ import {
   FilterList as FilterIcon,
   KeyboardArrowDown as ScrollDownIcon
 } from '@mui/icons-material';
+import { shouldShowLogs } from '@/utils/featureFlags';
 
 interface LogEntry {
   timestamp: number;
@@ -36,6 +37,7 @@ interface LogViewerProps {
   autoScroll?: boolean; // Whether to automatically scroll to the bottom
   height?: string | number; // Height of the log viewer
   label?: string; // Label for the log viewer
+  isVisible?: boolean; // Whether this component should be visible (for developer mode)
 }
 
 const LogViewer: React.FC<LogViewerProps> = ({
@@ -43,8 +45,12 @@ const LogViewer: React.FC<LogViewerProps> = ({
   maxLogs = 100,
   autoScroll = true,
   height = 300,
-  label = "Processing Logs"
+  label = "Processing Logs",
+  isVisible = shouldShowLogs() // Use our feature flag utility
 }) => {
+  // Exit early if not visible
+  if (!isVisible) return null;
+  
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [isAutoScrolling, setIsAutoScrolling] = useState(autoScroll);

@@ -1,0 +1,4 @@
+ backend/services/ai_service.py          |  78 [32m++++++++++++++[m[31m---------------[m
+ backend/services/analysis_service.py    |  31 [32m+++++++++[m[31m---[m
+ backend/services/huggingface_service.py | 154 [32m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++[m[31m-[m
+ 3 files changed, 212 insertions(+), 51 deletions(-)

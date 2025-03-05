@@ -159,3 +159,21 @@ The API documentation is available at:
 ## License
 
 MIT
+
+## Feature Flags
+
+The Annual Report Analyzer uses a feature flag system to control the visibility of certain features, particularly debugging tools. The main flags are:
+
+- `SHOW_DEVELOPER_TOOLS`: Shows developer-oriented components and tools
+- `SHOW_PROCESSING_LOGS`: Shows detailed processing logs
+
+You can enable these features by:
+
+1. In development: Toggle "Admin Mode" in the navigation bar
+2. In production: Set environment variables:
+   - `NEXT_PUBLIC_SHOW_DEVELOPER_TOOLS=true`
+   - `NEXT_PUBLIC_SHOW_PROCESSING_LOGS=true`
+
+### Development Admin Mode
+
+When running in development mode, you can toggle "Admin Mode" in the navigation bar to show debugging components like the LogViewer. This is a convenient way to test the application with and without these components visible.

@@ -850,38 +850,30 @@ class AIService:
         
         return summary
     
-    def analyze_report_text(self, text: str) -> Dict[str, Any]:
-        """Analyze report text using FinBERT model and extract insights."""
-        if not text:
-            logger.warning("Empty text provided for analysis")
-            return {
-                "status": "error",
-                "message": "No text provided for analysis",
-                "metrics": [],
-                "risks": [],
-                "executive_summary": "",
-                "business_outlook": "",
-                "sentiment": {"sentiment": "neutral", "explanation": "No text to analyze"}
-            }
+    def analyze_financial_text(self, text: str) -> Dict[str, Any]:
+        """
+        Analyze financial text to extract insights, metrics, and summaries.
         
-        logger.info(f"Starting analysis of report text ({len(text)} characters)")
+        Args:
+            text: Financial text to analyze
+            
+        Returns:
+            Dictionary with analysis results
+        """
+        logger.info(f"Analyzing financial text of length {len(text)}")
         
-        # Track component errors for graceful degradation
+        # Track component errors
         component_errors = {
             "metrics": False,
-            "risks": False,
             "executive_summary": False,
             "business_outlook": False,
             "sentiment": False,
-            "entities": False
+            "entities": False,
+            "risk_analysis": False
         }
         
-        # Split text into chunks for processing
-        chunks = self._chunk_text(text)
-        logger.info(f"Split report into {len(chunks)} chunks for analysis")
-        
-        # Extract financial metrics (from first few chunks)
-        metrics = []
+        # Extract financial metrics
+        metrics = {}
         try:
             metrics = self.extract_financial_metrics(text)
             logger.info(f"Extracted {len(metrics)} financial metrics")
@@ -889,23 +881,20 @@ class AIService:
             logger.error(f"Error extracting financial metrics: {str(e)}")
             component_errors["metrics"] = True
         
-        # Extract risk factors
-        risks = []
+        # Generate executive summary using the new Mistral-based method
+        executive_summary = {}
         try:
-            risks = self.extract_risk_factors(text)
-            logger.info(f"Extracted {len(risks)} risk factors")
+            executive_summary = self.huggingface_service.generate_summary(text, metrics)
+            logger.info(f"Generated executive summary using Mistral: {len(executive_summary.get('summary', ''))} characters")
         except Exception as e:
-            logger.error(f"Error extracting risk factors: {str(e)}")
-            component_errors["risks"] = True
-        
-        # Generate executive summary
-        executive_summary = ""
-        try:
-            executive_summary = self.generate_summary(text, "executive")
-            logger.info(f"Generated executive summary: {len(executive_summary)} characters")
-        except Exception as e:
-            logger.error(f"Error generating executive summary: {str(e)}")
+            logger.error(f"Error generating executive summary with Mistral: {str(e)}")
             component_errors["executive_summary"] = True
+            # Fallback to old method if needed
+            try:
+                executive_summary = {"summary": self.generate_summary(text, "executive")}
+                logger.info(f"Generated executive summary using fallback method: {len(executive_summary.get('summary', ''))} characters")
+            except Exception as fallback_error:
+                logger.error(f"Error generating executive summary with fallback: {str(fallback_error)}")
         
         # Generate business outlook
         business_outlook = ""
@@ -948,13 +937,18 @@ class AIService:
         return {
             "status": "success" if not any(component_errors.values()) else "partial",
             "metrics": metrics,
-            "risks": risks,
-            "executive_summary": executive_summary,
+            "risks": risk_analysis.get("risks", []),
+            "executive_summary": executive_summary.get("summary", ""),
             "business_outlook": business_outlook,
             "sentiment": sentiment,
             "entities": entities,
-            "risk": risk_analysis,
-            "errors": [k for k, v in component_errors.items() if v]
+            "component_errors": component_errors,
+            "insights": self._generate_insights({
+                "metrics": metrics,
+                "sentiment": sentiment,
+                "risks": risk_analysis.get("risks", []),
+                "entities": entities
+            })
         }
     
     def analyze_report(self, report_text: str) -> Dict[str, Any]:
@@ -968,7 +962,7 @@ class AIService:
                 logger.warning("No valid Hugging Face API key. Using fallback methods.")
             
             # Analyze the report text
-            analysis_result = self.analyze_report_text(report_text)
+            analysis_result = self.analyze_financial_text(report_text)
             
             # Calculate processing time
             processing_time = time.time() - start_time

@@ -33,6 +33,8 @@ import Link from 'next/link';
 import PageLayout from '@/components/PageLayout';
 import ClientOnlyPortal from '@/components/ClientOnlyPortal';
 import LogViewer from '@/components/LogViewer';
+import { shouldShowLogs } from '@/utils/featureFlags';
+import DebugContainer from '@/components/DebugContainer';
 
 // Define report type
 interface Report {
@@ -476,7 +478,7 @@ export default function Home() {
                 Please do not navigate away from this page until processing is complete.
               </Typography>
               
-              {uploadedReportId && (
+              {uploadedReportId && shouldShowLogs() && (
                 <Box sx={{ mt: 2 }}>
                   <LogViewer 
                     reportId={uploadedReportId} 
@@ -485,6 +487,20 @@ export default function Home() {
                   />
                 </Box>
               )}
+              
+              {/* Example of using DebugContainer for other debugging elements */}
+              <DebugContainer title="Upload Process Debug Info">
+                <Typography variant="body2">
+                  Report ID: {uploadedReportId || 'None'}
+                </Typography>
+                <Typography variant="body2">
+                  Processing Status: {processingStatus || 'Not started'}
+                </Typography>
+                <Typography variant="body2">
+                  Current Step: {processingStep || 'None'}
+                </Typography>
+              </DebugContainer>
+              
             </Box>
           )}
         </Paper>

@@ -364,16 +364,31 @@ class AnalysisService:
         
         # Try to get executive summary with error handling
         try:
-            logger.info("Generating executive summary...")
-            executive_summary = self.ai_service.generate_summary(text, "executive")
+            logger.info("Generating executive summary using Mistral...")
+            # Get metrics to include in the summary
+            metrics_dict = analysis_result.get("metrics", {})
+            
+            # Use the HuggingFaceService's generate_summary method
+            summary_result = self.ai_service.huggingface_service.generate_summary(text, metrics_dict)
+            executive_summary = summary_result.get("summary", "")
+            
             analysis_result["executive_summary"] = executive_summary
-            logger.info("Successfully generated executive summary")
+            analysis_result["summary_model"] = summary_result.get("model", "mistralai/Mistral-7B-Instruct-v0.1")
+            logger.info(f"Successfully generated executive summary using {analysis_result['summary_model']}")
         except Exception as summary_error:
-            logger.error(f"Error generating executive summary: {str(summary_error)}")
-            analysis_result["executive_summary"] = "Error generating executive summary."
-            analysis_result["component_errors"].append(
-                {"component": "executive_summary", "error": str(summary_error)}
-            )
+            logger.error(f"Error generating executive summary with Mistral: {str(summary_error)}")
+            # Fallback to old method
+            try:
+                executive_summary = self.ai_service.generate_summary(text, "executive")
+                analysis_result["executive_summary"] = executive_summary
+                analysis_result["summary_model"] = "legacy_extractive"
+                logger.info("Successfully generated executive summary using fallback method")
+            except Exception as fallback_error:
+                logger.error(f"Error generating executive summary with fallback: {str(fallback_error)}")
+                analysis_result["executive_summary"] = "Error generating executive summary."
+                analysis_result["component_errors"].append(
+                    {"component": "executive_summary", "error": str(summary_error)}
+                )
         
         # Try to get business outlook with error handling
         try:

@@ -5,6 +5,8 @@ import time
 import re
 from typing import List, Dict, Any, Optional, Union
 from dotenv import load_dotenv
+from datetime import datetime
+import random  # For jitter in retry logic
 
 # Load environment variables
 load_dotenv()
@@ -28,6 +30,8 @@ class HuggingFaceService:
         self.sentiment_model_url = "https://api-inference.huggingface.co/models/yiyanghkust/finbert-tone"
         self.finbert_model_url = "https://api-inference.huggingface.co/models/ProsusAI/finbert"  # Financial BERT model
         self.risk_model_url = "https://api-inference.huggingface.co/models/ProsusAI/finbert"  # Same model for risk analysis
+        self.mistral_model = "mistral-large-latest"  # Default model, can be change
+        self.mistral_model_url = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.1"  # Mistral model for summaries
         
         # Chunking parameters - adjusted for BERT model limits
         self.max_tokens = 512  # Maximum tokens per chunk for BERT models
@@ -140,6 +144,8 @@ class HuggingFaceService:
         # If we've exhausted retries, use the mock response
         logger.warning(f"HUGGINGFACE: Using mock response after {max_retries} failed API attempts")
         return self._get_mock_response(model_url, text)
+    
+   
         
     def _get_mock_response(self, model_url: str, text: str) -> Dict[str, Any]:
         """
@@ -965,4 +971,154 @@ class HuggingFaceService:
             
         insights["overall"] = overall
         
-        return insights 
+        return insights
+    
+    def generate_summary(self, text: str, metrics_dict: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Generate a comprehensive summary of an annual report incorporating extracted metrics
+        using the Mistral-7B-Instruct-v0.1 model.
+        
+        Args:
+            text (str): The text content of the annual report
+            metrics_dict (dict): Optional dictionary of metrics from database
+            
+        Returns:
+            Dict[str, Any]: A structured summary of the annual report with metrics
+        """
+        try:
+            logger.info(f"Generating summary for text of length {len(text)} using Mistral model")
+            
+            # Chunk the text to handle large reports
+            chunks = self._chunk_text(text)
+            logger.info(f"Split text into {len(chunks)} chunks for summary generation")
+            
+            # Create a prompt that includes metrics if provided
+            metrics_prompt = ""
+            if metrics_dict and isinstance(metrics_dict, dict):
+                metrics_prompt = "Key financial metrics from the report:\n"
+                for key, value in metrics_dict.items():
+                    if isinstance(value, (int, float)):
+                        metrics_prompt += f"- {key.replace('_', ' ').title()}: {value}\n"
+                    elif isinstance(value, str):
+                        metrics_prompt += f"- {key.replace('_', ' ').title()}: {value}\n"
+                metrics_prompt += "\n"
+            
+            # Process each chunk and combine results
+            summaries = []
+            
+            for i, chunk in enumerate(chunks):
+                logger.info(f"Processing chunk {i+1}/{len(chunks)} for summary")
+                
+                # Create the instruction prompt for Mistral
+                if i == 0:  # First chunk gets the metrics
+                    instruction = f"""<s>[INST] You are a financial analyst assistant. Generate a concise, professional summary of the following annual report excerpt. 
+{metrics_prompt}
+Focus on key financial information, business performance, risks, and future outlook. 
+Be factual and objective. [/INST]</s>
+
+[INST] Here is the report excerpt:
+{chunk}
+
+Generate a summary that incorporates the provided metrics and key information from this text. [/INST]"""
+                else:
+                    instruction = f"""<s>[INST] You are a financial analyst assistant. Generate a concise, professional summary of the following annual report excerpt.
+Focus on key financial information, business performance, risks, and future outlook that wasn't covered in previous sections.
+Be factual and objective. [/INST]</s>
+
+[INST] Here is the report excerpt:
+{chunk}
+
+Generate a summary that focuses on new information from this section. [/INST]"""
+                
+                # Call the Mistral API - no authentication required
+                try:
+                    response = self._call_api(self.mistral_model_url, instruction)
+                    
+                    # Extract the generated text
+                    if isinstance(response, list) and len(response) > 0:
+                        generated_text = response[0].get('generated_text', '')
+                        if generated_text:
+                            summaries.append(generated_text)
+                    elif isinstance(response, dict) and 'generated_text' in response:
+                        summaries.append(response['generated_text'])
+                    else:
+                        logger.warning(f"Unexpected response format from Mistral API: {response}")
+                except Exception as e:
+                    logger.error(f"Error calling Mistral API for chunk {i+1}: {str(e)}")
+            
+            # Combine summaries
+            if not summaries:
+                return self._fallback_summary_generation(text, metrics_dict)
+            
+            # Combine the summaries into a structured format
+            combined_summary = "\n\n".join(summaries)
+            
+            # Create a structured response
+            return {
+                "summary": combined_summary,
+                "chunk_count": len(chunks),
+                "processed_chunks": len(summaries),
+                "model": "mistralai/Mistral-7B-Instruct-v0.1",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error generating summary with Mistral: {str(e)}")
+            return self._fallback_summary_generation(text, metrics_dict)
+        
+    def _fallback_summary_generation(self, text: str, metrics_dict: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Generate a fallback summary when the Mistral API call fails.
+        
+        Args:
+            text (str): The text content of the annual report
+            metrics_dict (dict): Optional dictionary of metrics from database
+            
+        Returns:
+            Dict[str, Any]: A basic summary of the annual report
+        """
+        logger.info("Using fallback summary generation method")
+        
+        # Extract key sentences based on financial keywords
+        sentences = re.split(r'(?<=[.!?])\s+', text[:5000])  # Use first 5000 chars for fallback
+        
+        # Keywords relevant to financial reports
+        financial_keywords = [
+            'revenue', 'profit', 'growth', 'increase', 'decrease', 'market',
+            'sales', 'earnings', 'performance', 'outlook', 'forecast',
+            'strategy', 'investment', 'dividend', 'shareholder', 'future',
+            'expansion', 'acquisition', 'innovation', 'technology', 'competitive'
+        ]
+        
+        # Score sentences based on keyword presence
+        scored_sentences = []
+        for sentence in sentences:
+            if len(sentence.split()) < 5:  # Skip very short sentences
+                continue
+                
+            score = sum(1 for keyword in financial_keywords if keyword.lower() in sentence.lower())
+            if score > 0:
+                scored_sentences.append((sentence, score))
+        
+        # Sort by score and take top sentences
+        scored_sentences.sort(key=lambda x: x[1], reverse=True)
+        key_sentences = [s[0] for s in scored_sentences[:10]]
+        
+        # Create summary
+        summary = " ".join(key_sentences)
+        
+        # Add metrics information if available
+        if metrics_dict and isinstance(metrics_dict, dict):
+            metrics_summary = "\n\nKey Financial Metrics:\n"
+            for key, value in metrics_dict.items():
+                if isinstance(value, (int, float, str)):
+                    metrics_summary += f"- {key.replace('_', ' ').title()}: {value}\n"
+            summary += metrics_summary
+        
+        return {
+            "summary": summary,
+            "chunk_count": 1,
+            "processed_chunks": 1,
+            "model": "fallback_extractive",
+            "timestamp": datetime.now().isoformat()
+        } 

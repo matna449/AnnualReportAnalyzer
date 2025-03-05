@@ -32,6 +32,7 @@ import {
 } from '@mui/icons-material';
 import PageLayout from '@/components/PageLayout';
 import LogViewer from '@/components/LogViewer';
+import { shouldShowLogs } from '@/utils/featureFlags';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -604,7 +605,11 @@ export default function ReportDetails({ params }: { params: { id: string } }) {
                 <Tab label="Metrics" id="report-tab-1" aria-controls="report-tabpanel-1" />
                 <Tab label="Insights" id="report-tab-2" aria-controls="report-tabpanel-2" />
                 <Tab label="AI Analysis" id="report-tab-3" aria-controls="report-tabpanel-3" />
-                <Tab label="Logs" id="report-tab-4" aria-controls="report-tabpanel-4" onClick={() => setShowLogs(true)} />
+                <Tab label="Financial Data" id="report-tab-4" aria-controls="report-tabpanel-4" />
+                <Tab label="Raw Text" id="report-tab-5" aria-controls="report-tabpanel-5" />
+                {shouldShowLogs() && (
+                  <Tab label="Logs" id="report-tab-6" aria-controls="report-tabpanel-6" onClick={() => setShowLogs(true)} />
+                )}
               </Tabs>
             </Box>
             
@@ -737,22 +742,32 @@ export default function ReportDetails({ params }: { params: { id: string } }) {
             </TabPanel>
             
             <TabPanel value={tabValue} index={4}>
-              {showLogs && (
-                <Box sx={{ mt: 2 }}>
-                  <Typography variant="h6" gutterBottom>
-                    Processing Logs
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary" paragraph>
-                    These logs show the processing steps for this report. They can help diagnose issues if the analysis is incomplete.
-                  </Typography>
-                  <LogViewer 
-                    reportId={parseInt(reportId)} 
-                    height={500} 
-                    label={`Report ${reportId} Processing Logs`} 
-                  />
-                </Box>
-              )}
+              {/* Financial Data Tab Content */}
             </TabPanel>
+            
+            <TabPanel value={tabValue} index={5}>
+              {/* Raw Text Tab Content */}
+            </TabPanel>
+            
+            {shouldShowLogs() && (
+              <TabPanel value={tabValue} index={6}>
+                {showLogs && (
+                  <Box sx={{ mt: 2 }}>
+                    <Typography variant="h6" gutterBottom>
+                      Processing Logs
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" paragraph>
+                      These logs show the processing steps for this report. They can help diagnose issues if the analysis is incomplete.
+                    </Typography>
+                    <LogViewer 
+                      reportId={parseInt(reportId)} 
+                      height={500} 
+                      label={`Report ${reportId} Processing Logs`} 
+                    />
+                  </Box>
+                )}
+              </TabPanel>
+            )}
           </>
         ) : (
           <Alert severity="info">No report data found.</Alert>
