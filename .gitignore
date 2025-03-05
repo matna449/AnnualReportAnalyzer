@@ -59,3 +59,10 @@ __pycache__/
 /setup_finbert.py
 
 annual_report_analyser/.next/
+
+new_project_env/
+new_venv/
+test_huggingface.py
+verify_refactoring.py 
+backend/uploads
+backend/tests

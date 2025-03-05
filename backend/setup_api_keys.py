@@ -34,7 +34,7 @@ def setup_api_keys():
     if huggingface_api_key:
         env_content = env_content.replace(
             "HUGGINGFACE_API_KEY=your_huggingface_api_key_here", 
-            f "HUGGINGFACE_API_KEY={huggingface_api_key}"
+            f"HUGGINGFACE_API_KEY={huggingface_api_key}"
         )
         print("Hugging Face API key updated.")
     
