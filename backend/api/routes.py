@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, BackgroundTasks
 from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime
@@ -38,8 +38,29 @@ async def create_company(
     company: CompanyCreate,
     db: Session = Depends(get_db)
 ):
-    """Create a new company."""
-    return DBService.create_company(db, company)
+    """
+    Create a new company.
+    
+    Note: This endpoint is currently not used by the frontend.
+    It's available for administrative purposes or future integration.
+    
+    Args:
+        company: Company data to create
+        db: Database session (injected)
+        
+    Returns:
+        Created company object
+        
+    Raises:
+        HTTPException: If company creation fails
+    """
+    company_obj, error = DBService.create_company(db, company)
+    
+    if error:
+        logger.error(f"Error creating company: {error}")
+        raise HTTPException(status_code=500, detail=error)
+        
+    return company_obj
 
 @router.get("/companies/", response_model=List[Company])
 async def get_companies(
@@ -67,15 +88,32 @@ async def update_company(
     company: CompanyUpdate,
     db: Session = Depends(get_db)
 ):
-    """Update a company."""
-    try:
-        updated_company = DBService.update_company(db, company_id, company)
-        if updated_company is None:
-            raise HTTPException(status_code=404, detail="Company not found")
-        return updated_company
-    except Exception as e:
-        logger.error(f"Error updating company: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    """
+    Update an existing company.
+    
+    Note: This endpoint is currently not used by the frontend.
+    It's available for administrative purposes or future integration.
+    
+    Args:
+        company_id: ID of the company to update
+        company: Updated company data
+        db: Database session (injected)
+        
+    Returns:
+        Updated company object
+        
+    Raises:
+        HTTPException: If company not found or update fails
+    """
+    updated_company, error = DBService.update_company(db, company_id, company)
+    
+    if error:
+        logger.error(f"Error updating company {company_id}: {error}")
+        if "not found" in error.lower():
+            raise HTTPException(status_code=404, detail=error)
+        raise HTTPException(status_code=500, detail=error)
+        
+    return updated_company
 
 # Report routes
 @router.post("/reports/upload")
@@ -120,11 +158,24 @@ async def upload_report(
         logger.info(f"PIPELINE: Creating or retrieving company: {company_name}")
         company = DBService.get_company_by_name(db, company_name)
         if not company:
-            company = DBService.create_company(db, CompanyCreate(
+            company_result = DBService.create_company(db, CompanyCreate(
                 name=company_name,
                 ticker=ticker,
                 sector=sector
             ))
+            
+            # Handle the tuple return value (company, error_message)
+            if isinstance(company_result, tuple) and len(company_result) == 2:
+                company, error_message = company_result
+                if error_message:
+                    logger.error(f"PIPELINE: Error creating company: {error_message}")
+                    return JSONResponse(
+                        status_code=500,
+                        content={"error": f"Error creating company: {error_message}"}
+                    )
+            else:
+                company = company_result  # For backward compatibility
+                
             logger.info(f"PIPELINE: Created new company with ID {company.id}")
         else:
             logger.info(f"PIPELINE: Found existing company with ID {company.id}")
@@ -140,15 +191,29 @@ async def upload_report(
             os.makedirs("uploads")
             
         logger.info(f"PIPELINE: Saving PDF file to {file_path}")
+        
+        # Handle potential tuples or lists in file object
+        file_obj = file
+        if isinstance(file, tuple) or isinstance(file, list):
+            logger.info(f"PIPELINE: File object is a tuple/list, extracting first element")
+            file_obj = file[0] if len(file) > 0 else None
+            if not file_obj:
+                logger.error("PIPELINE: UPLOAD FAILED - Invalid file tuple/list")
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "Invalid file object received"}
+                )
+        
+        # Now safely use file_obj
         with open(file_path, "wb") as buffer:
-            buffer.write(await file.read())
+            buffer.write(await file_obj.read())
         
         # Create report
         logger.info(f"PIPELINE: Creating report record for company {company.id}")
         report_create = ReportCreate(
             company_id=company.id,
             year=str(year),
-            file_name=file.filename,
+            file_name=file_obj.filename if hasattr(file_obj, 'filename') else filename,
             file_path=file_path,
             processing_status="pending"
         )
@@ -184,36 +249,67 @@ async def upload_report(
             content={"error": f"Error uploading file: {str(e)}"}
         )
 
-@router.get("/reports/")
+@router.get("/reports/", response_model=List[Dict[str, Any]])
 async def get_reports(
     db: Session = Depends(get_db),
     skip: int = 0,
     limit: int = 100
 ):
-    """Get all reports."""
-    return DBService.get_reports(db, skip, limit)
+    """
+    Get a list of all reports with pagination.
+    
+    Note: This endpoint is currently not directly used by the frontend.
+    The dashboard and search pages use more specific endpoints instead.
+    This endpoint is maintained for API completeness and future use.
+    
+    Args:
+        db: Database session (injected)
+        skip: Number of records to skip (for pagination)
+        limit: Maximum number of records to return
+        
+    Returns:
+        List of report objects
+    """
+    reports = DBService.get_reports(db, skip, limit)
+    
+    return [
+        {
+            "id": report.id,
+            "company_name": report.company.name if report.company else "Unknown",
+            "ticker": report.company.ticker if report.company else None,
+            "year": report.year,
+            "upload_date": report.upload_date.isoformat(),
+            "processing_status": report.processing_status
+        }
+        for report in reports
+    ]
 
 @router.get("/reports/{report_id}", response_model=Dict[str, Any])
 async def get_report(
     report_id: int,
     db: Session = Depends(get_db)
 ):
-    """Get a report by ID with all associated data."""
-    report = DBService.get_report(db, report_id)
-    if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
+    """
+    Get a specific report by ID with all associated data.
     
-    result = {
-        "id": report.id,
-        "company_id": report.company_id,
-        "company_name": report.company.name if report.company else "",
-        "year": report.year,
-        "file_name": report.file_name,
-        "upload_date": report.upload_date,
-        "processing_status": report.processing_status,
-        "page_count": report.page_count
-    }
-    return result
+    Args:
+        report_id: The ID of the report to retrieve
+        db: Database session (injected)
+        
+    Returns:
+        Complete report data with metrics and summaries
+        
+    Raises:
+        HTTPException: If report is not found or database error occurs
+    """
+    report_data, error = DBService.get_report_full_data(db, report_id)
+    
+    if error:
+        logger.error(f"Error retrieving report {report_id}: {error}")
+        raise HTTPException(status_code=404 if "not found" in error.lower() else 500, 
+                           detail=error)
+    
+    return report_data
 
 @router.get("/companies/{company_id}/reports")
 async def get_company_reports(
@@ -265,138 +361,147 @@ async def compare_reports(
     comparison_request: ComparisonRequest,
     db: Session = Depends(get_db)
 ):
-    """Compare metrics and summaries between multiple reports."""
+    """
+    Compare two or more annual reports and generate AI analysis of differences.
+    
+    Args:
+        comparison_request: Request containing list of report IDs to compare
+        db: Database session (injected)
+        
+    Returns:
+        Dictionary with comparison data and analysis
+        
+    Raises:
+        HTTPException: If reports not found or comparison fails
+    """
+    report_ids = comparison_request.report_ids
+    
+    if len(report_ids) < 2:
+        raise HTTPException(status_code=400, detail="At least two reports are required for comparison")
+    
     try:
-        # Validate report IDs
-        report_ids = comparison_request.report_ids
-        if len(report_ids) < 2:
-            raise HTTPException(status_code=400, detail="At least two reports are required for comparison")
+        # Fetch all reports in a single query with their company relationships
+        reports = db.query(Report).filter(Report.id.in_(report_ids)).options(
+            joinedload(Report.company)
+        ).all()
         
-        # Get reports data
-        reports_data = []
+        if len(reports) != len(report_ids):
+            raise HTTPException(status_code=404, detail="One or more reports not found")
+        
+        # Map reports by ID for easy access
+        reports_by_id = {report.id: report for report in reports}
+        
+        # Collect all report IDs for batch loading summaries
+        all_report_ids = list(reports_by_id.keys())
+        
+        # Fetch all summaries for these reports in a single query
+        all_summaries = db.query(Summary).filter(
+            Summary.report_id.in_(all_report_ids)
+        ).all()
+        
+        # Group summaries by report ID
+        summaries_by_report = {}
+        for summary in all_summaries:
+            if summary.report_id not in summaries_by_report:
+                summaries_by_report[summary.report_id] = []
+            summaries_by_report[summary.report_id].append(summary)
+        
+        # Format the report data for comparison
+        comparison_data = {
+            "reports": []
+        }
+        
+        # Process each report
         for report_id in report_ids:
-            report = DBService.get_report(db, report_id)
-            if not report:
-                raise HTTPException(status_code=404, detail=f"Report with ID {report_id} not found")
-            reports_data.append(report)
-        
-        # Get metrics for comparison
-        metrics_comparison = {}
-        for report in reports_data:
-            metrics = db.query(Metric).filter(Metric.report_id == report.id).all()
-            
-            # Filter metrics if specified
-            if comparison_request.metrics:
-                metrics = [m for m in metrics if m.name in comparison_request.metrics]
-            
-            # Organize metrics by name
-            for metric in metrics:
-                if metric.name not in metrics_comparison:
-                    metrics_comparison[metric.name] = {}
-                
-                metrics_comparison[metric.name][report.id] = {
-                    "value": metric.value,
-                    "unit": metric.unit,
-                    "year": report.year,
-                    "company_name": report.company.name if report.company else "Unknown"
-                }
-        
-        # Get summaries for comparison
-        summaries_comparison = {}
-        for report in reports_data:
-            summaries = DBService.get_summaries_by_report(db, report.id)
-            
-            # Organize summaries by category
+            report = reports_by_id.get(report_id)
             report_summaries = {}
-            for summary in summaries:
+            
+            # Process summaries for this report
+            for summary in summaries_by_report.get(report_id, []):
                 report_summaries[summary.category] = summary.content
             
-            summaries_comparison[report.id] = {
-                "summaries": report_summaries,
+            # Add report data to comparison result
+            comparison_data["reports"].append({
+                "id": report.id,
+                "company_id": report.company_id,
+                "company_name": report.company.name if report.company else "Unknown",
                 "year": report.year,
-                "company_name": report.company.name if report.company else "Unknown"
-            }
+                "summaries": report_summaries
+            })
         
         # Generate AI comparison analysis if available
-        comparison_analysis = {}
-        try:
-            # Get the summaries for each report
-            report1_summaries = summaries_comparison[report_ids[0]]["summaries"]
-            report2_summaries = summaries_comparison[report_ids[1]]["summaries"]
+        if len(report_ids) == 2:
+            comparison_analysis = {}
+            report1_data = comparison_data["reports"][0]
+            report2_data = comparison_data["reports"][1]
             
             # Compare executive summaries
-            if "executive" in report1_summaries and "executive" in report2_summaries:
+            if "executive" in report1_data["summaries"] and "executive" in report2_data["summaries"]:
                 comparison_analysis["executive"] = await analysis_service.compare_texts(
-                    report1_summaries["executive"],
-                    report2_summaries["executive"],
+                    report1_data["summaries"]["executive"],
+                    report2_data["summaries"]["executive"],
                     "Compare these two executive summaries and highlight key differences and similarities:"
                 )
             
             # Compare risk factors
-            if "risks" in report1_summaries and "risks" in report2_summaries:
+            if "risks" in report1_data["summaries"] and "risks" in report2_data["summaries"]:
                 comparison_analysis["risks"] = await analysis_service.compare_texts(
-                    report1_summaries["risks"],
-                    report2_summaries["risks"],
+                    report1_data["summaries"]["risks"],
+                    report2_data["summaries"]["risks"],
                     "Compare these two risk assessments and identify which report presents higher risks:"
                 )
             
             # Compare business outlook
-            if "outlook" in report1_summaries and "outlook" in report2_summaries:
+            if "outlook" in report1_data["summaries"] and "outlook" in report2_data["summaries"]:
                 comparison_analysis["outlook"] = await analysis_service.compare_texts(
-                    report1_summaries["outlook"],
-                    report2_summaries["outlook"],
+                    report1_data["summaries"]["outlook"],
+                    report2_data["summaries"]["outlook"],
                     "Compare these two business outlooks and determine which is more optimistic:"
                 )
             
-            # Compare sentiment
-            if "sentiment" in report1_summaries and "sentiment" in report2_summaries:
-                comparison_analysis["sentiment"] = await analysis_service.compare_texts(
-                    report1_summaries["sentiment"],
-                    report2_summaries["sentiment"],
-                    "Compare these two sentiment analyses and determine which report has a more positive tone:"
-                )
-        except Exception as e:
-            logger.warning(f"Error generating AI comparison: {str(e)}")
-            comparison_analysis = {"error": str(e)}
+            comparison_data["analysis"] = comparison_analysis
         
-        # Format the response
-        result = {
-            "reports": [
-                {
-                    "id": report.id,
-                    "company_id": report.company_id,
-                    "company_name": report.company.name if report.company else "Unknown",
-                    "year": report.year,
-                    "file_name": report.file_name
-                }
-                for report in reports_data
-            ],
-            "metrics_comparison": metrics_comparison,
-            "summaries_comparison": summaries_comparison,
-            "ai_analysis": comparison_analysis
-        }
-        
-        return result
+        return comparison_data
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error comparing reports: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error comparing reports: {str(e)}")
 
-@router.get("/companies/{company_id}/metrics", response_model=Dict[str, List])
+@router.get("/companies/{company_id}/metrics", response_model=Dict[str, Any])
 async def get_company_metrics(
     company_id: int,
     metric_names: str = Query(None),
     db: Session = Depends(get_db)
 ):
-    """Get metrics for a specific company across all reports."""
-    # Parse metric names if provided
-    metric_list = None
-    if metric_names:
-        metric_list = [name.strip() for name in metric_names.split(",")]
+    """
+    Get metrics for a specific company across all reports.
     
-    metrics = DBService.get_company_metrics(db, company_id, metric_list)
-    return metrics
+    Args:
+        company_id: ID of the company to get metrics for
+        metric_names: Optional comma-separated list of metric names to filter by
+        db: Database session (injected)
+        
+    Returns:
+        Dictionary with metrics organized by metric name
+        
+    Raises:
+        HTTPException: If company not found or database error occurs
+    """
+    # Parse metric names if provided
+    metric_names_list = None
+    if metric_names:
+        metric_names_list = [name.strip() for name in metric_names.split(',')]
+    
+    # Get metrics from database service
+    metrics_data, error = DBService.get_company_metrics(db, company_id, metric_names_list)
+    
+    if error:
+        logger.error(f"Error retrieving metrics for company {company_id}: {error}")
+        raise HTTPException(status_code=404 if "no reports found" in error.lower() else 500, 
+                           detail=error)
+    
+    return metrics_data
 
 # Dashboard routes
 @router.get("/dashboard/summary", response_model=Dict[str, Any])
@@ -522,235 +627,6 @@ async def get_report_summaries(
         logger.error(f"Error fetching summaries for report {report_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching summaries: {str(e)}")
 
-@router.post("/reports/{report_id}/enhanced-analysis", response_model=Dict[str, Any])
-def run_enhanced_analysis(
-    report_id: int,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
-):
-    """
-    Run enhanced analysis on a report using Hugging Face models.
-    This includes entity extraction, sentiment analysis, and risk assessment.
-    """
-    try:
-        logger.info(f"===== PIPELINE: ENHANCED ANALYSIS REQUEST - Report ID: {report_id} =====")
-        
-        # Check if report exists
-        report = DBService.get_report_by_id(db, report_id)
-        if not report:
-            logger.error(f"PIPELINE: ENHANCED ANALYSIS FAILED - Report with ID {report_id} not found")
-            raise HTTPException(status_code=404, detail=f"Report with ID {report_id} not found")
-        
-        # Check if the report has been successfully processed
-        if report.processing_status != "completed":
-            logger.error(f"PIPELINE: ENHANCED ANALYSIS FAILED - Report {report_id} has status '{report.processing_status}', not 'completed'")
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Report must be in 'completed' status to run enhanced analysis. Current status: {report.processing_status}"
-            )
-        
-        # Get report summaries
-        summaries = DBService.get_summaries_by_report_id(db, report_id)
-        if not summaries:
-            logger.error(f"PIPELINE: ENHANCED ANALYSIS FAILED - Report {report_id} has no summaries to analyze")
-            raise HTTPException(status_code=400, detail="Report has no summaries to analyze")
-        
-        logger.info(f"PIPELINE: Found {len(summaries)} summaries for report {report_id}")
-        
-        # Check if enhanced analysis already exists
-        existing_analysis = DBService.get_enhanced_analysis_by_report_id(db, report_id)
-        if existing_analysis and existing_analysis.get("status") == "success":
-            logger.info(f"PIPELINE: Enhanced analysis already exists for report {report_id}")
-            return {"status": "success", "message": "Enhanced analysis already exists", "report_id": report_id}
-        
-        # Update report status to indicate analysis in progress
-        try:
-            report.processing_status = "processing_enhanced_analysis"
-            db.commit()
-            logger.info(f"PIPELINE: Updated report {report_id} status to processing_enhanced_analysis")
-        except Exception as update_error:
-            logger.error(f"PIPELINE: Error updating report status for {report_id}: {str(update_error)}")
-            db.rollback()
-        
-        # Run analysis in background
-        logger.info(f"PIPELINE: Starting background task for enhanced analysis of report {report_id}")
-        background_tasks.add_task(
-            process_enhanced_analysis,
-            db=db,
-            report_id=report_id,
-            summaries=summaries
-        )
-        
-        logger.info(f"PIPELINE: Enhanced analysis task scheduled for report {report_id}")
-        return {"status": "success", "message": "Enhanced analysis started", "report_id": report_id}
-    except HTTPException as e:
-        # Re-raise HTTP exceptions
-        logger.error(f"PIPELINE: HTTP Exception in enhanced analysis for report {report_id}: {str(e)}")
-        raise e
-    except Exception as e:
-        logger.error(f"PIPELINE: Error starting enhanced analysis for report {report_id}: {str(e)}")
-        # Try to update report status to indicate error
-        try:
-            report = DBService.get_report_by_id(db, report_id)
-            if report:
-                report.processing_status = "error_enhanced_analysis"
-                db.commit()
-                logger.info(f"PIPELINE: Updated report {report_id} status to error_enhanced_analysis")
-        except Exception as update_error:
-            logger.error(f"PIPELINE: Error updating report status for {report_id}: {str(update_error)}")
-        
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": f"Error starting enhanced analysis: {str(e)}", "report_id": report_id}
-        )
-
-@router.get("/reports/{report_id}/enhanced-analysis", response_model=Dict[str, Any])
-def get_enhanced_analysis(
-    report_id: int,
-    db: Session = Depends(get_db)
-):
-    """
-    Get enhanced analysis results for a report.
-    """
-    # Check if report exists
-    report = DBService.get_report_by_id(db, report_id)
-    if not report:
-        raise HTTPException(status_code=404, detail=f"Report with ID {report_id} not found")
-    
-    # Get enhanced analysis
-    analysis = DBService.get_enhanced_analysis_by_report_id(db, report_id)
-    
-    # Check if analysis exists
-    if not analysis.get("entities") and not analysis.get("sentiment") and not analysis.get("risk"):
-        return {
-            "status": "pending",
-            "message": "Enhanced analysis not yet available",
-            "report_id": report_id
-        }
-    
-    return {
-        "status": "success",
-        "report_id": report_id,
-        "analysis": analysis
-    }
-
-def process_enhanced_analysis(db: Session, report_id: int, summaries: List[Dict[str, Any]]):
-    """
-    Process enhanced analysis for a report using Hugging Face models.
-    This runs in the background and updates the report status when complete.
-    """
-    logger.info(f"===== PIPELINE: ENHANCED ANALYSIS STARTED - Report ID: {report_id} =====")
-    
-    try:
-        # Combine all summary texts
-        text_to_analyze = ""
-        for summary in summaries:
-            if summary.get("content"):
-                text_to_analyze += f"{summary.get('content', '')} "
-        
-        if not text_to_analyze:
-            logger.error(f"PIPELINE: ENHANCED ANALYSIS FAILED - No summary text found for report {report_id}")
-            report = DBService.get_report_by_id(db, report_id)
-            if report:
-                report.processing_status = "error_enhanced_analysis"
-                db.commit()
-            return
-        
-        logger.info(f"PIPELINE: Combined {len(summaries)} summaries for report {report_id}, total length: {len(text_to_analyze)} chars")
-        
-        # Get the HuggingFaceService instance and analyze the text
-        huggingface_service = HuggingFaceService()
-        
-        logger.info(f"PIPELINE: Running entity extraction for report {report_id}")
-        # Run entity extraction
-        entity_result = huggingface_service.extract_entities(text_to_analyze)
-        if not entity_result or entity_result.get("status") != "success":
-            logger.error(f"PIPELINE: Entity extraction failed for report {report_id}: {entity_result}")
-            
-        logger.info(f"PIPELINE: Running sentiment analysis for report {report_id}")
-        # Run sentiment analysis
-        sentiment_result = huggingface_service.analyze_sentiment(text_to_analyze)
-        if not sentiment_result or sentiment_result.get("status") != "success":
-            logger.error(f"PIPELINE: Sentiment analysis failed for report {report_id}: {sentiment_result}")
-            
-        logger.info(f"PIPELINE: Running risk analysis for report {report_id}")
-        # Run risk analysis
-        risk_result = huggingface_service.analyze_risk(text_to_analyze)
-        if not risk_result or risk_result.get("status") != "success":
-            logger.error(f"PIPELINE: Risk analysis failed for report {report_id}: {risk_result}")
-        
-        # Combine the results
-        enhanced_analysis = {
-            "status": "success",
-            "report_id": report_id,
-            "timestamp": datetime.now().isoformat(),
-            "entities": entity_result.get("entities", []) if entity_result and entity_result.get("status") == "success" else [],
-            "sentiment": sentiment_result.get("sentiment", {}) if sentiment_result and sentiment_result.get("status") == "success" else {},
-            "risk_factors": risk_result.get("risk_factors", []) if risk_result and risk_result.get("status") == "success" else []
-        }
-        
-        has_error = False
-        
-        # Log result summaries
-        if len(enhanced_analysis["entities"]) > 0:
-            logger.info(f"PIPELINE: Extracted {len(enhanced_analysis['entities'])} entities for report {report_id}")
-        else:
-            logger.warning(f"PIPELINE: No entities were extracted for report {report_id}")
-            has_error = True
-            
-        if enhanced_analysis["sentiment"]:
-            logger.info(f"PIPELINE: Sentiment analysis complete for report {report_id}: {enhanced_analysis['sentiment']}")
-        else:
-            logger.warning(f"PIPELINE: No sentiment data was generated for report {report_id}")
-            has_error = True
-            
-        if len(enhanced_analysis["risk_factors"]) > 0:
-            logger.info(f"PIPELINE: Extracted {len(enhanced_analysis['risk_factors'])} risk factors for report {report_id}")
-        else:
-            logger.warning(f"PIPELINE: No risk factors were extracted for report {report_id}")
-            has_error = True
-        
-        # Store the enhanced analysis
-        try:
-            logger.info(f"PIPELINE: Storing enhanced analysis for report {report_id}")
-            DBService.store_enhanced_analysis(db, report_id, enhanced_analysis)
-            
-            # Update report status
-            report = DBService.get_report_by_id(db, report_id)
-            if report:
-                if has_error:
-                    report.processing_status = "completed_with_warnings"
-                    logger.warning(f"PIPELINE: Enhanced analysis completed with warnings for report {report_id}")
-                else:
-                    report.processing_status = "completed"
-                    logger.info(f"PIPELINE: Enhanced analysis completed successfully for report {report_id}")
-                db.commit()
-                
-            logger.info(f"===== PIPELINE: ENHANCED ANALYSIS COMPLETE - Report ID: {report_id} =====")
-            
-        except Exception as store_error:
-            logger.error(f"PIPELINE: Error storing enhanced analysis for report {report_id}: {str(store_error)}")
-            # Try to update report status to indicate error
-            try:
-                report = DBService.get_report_by_id(db, report_id)
-                if report:
-                    report.processing_status = "error_enhanced_analysis"
-                    db.commit()
-            except Exception as update_error:
-                logger.error(f"PIPELINE: Error updating report status for {report_id}: {str(update_error)}")
-    
-    except Exception as e:
-        logger.error(f"PIPELINE: Error during enhanced analysis for report {report_id}: {str(e)}")
-        # Try to update report status to indicate error
-        try:
-            report = DBService.get_report_by_id(db, report_id)
-            if report:
-                report.processing_status = "error_enhanced_analysis"
-                db.commit()
-                logger.info(f"PIPELINE: Updated report {report_id} status to error_enhanced_analysis")
-        except Exception as update_error:
-            logger.error(f"PIPELINE: Error updating report status for {report_id}: {str(update_error)}") 
-
 @router.get("/reports/{report_id}/status", response_model=Dict[str, Any])
 def get_report_status(
     report_id: int,
@@ -797,7 +673,8 @@ def get_report_status(
             "company_name": report.company.name if report.company else None,
             "year": report.year,
             "upload_date": report.upload_date.isoformat() if report.upload_date else None,
-            "last_updated": last_updated
+            "last_updated": last_updated,
+            "error_message": report.error_message if hasattr(report, 'error_message') and report.error_message else None
         }
     
     except HTTPException as e:

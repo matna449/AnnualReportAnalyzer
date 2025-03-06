@@ -11,54 +11,66 @@ from time import sleep
 import time
 from datetime import datetime
 
+# Import shared utilities
+from services.nlp_utils import (
+    chunk_text,
+    extract_metrics_with_regex,
+    extract_risk_factors_with_regex,
+    fallback_sentiment_analysis,
+    extract_basic_entities
+)
+
 # Load environment variables
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 class AIService:
+    """
+    High-level service for AI analysis of financial reports.
+    Acts as an orchestrator using HuggingFaceService for model interactions.
+    """
+    
     def __init__(self):
+        """Initialize the AI service with dependencies and configuration."""
         self.huggingface_api_key = os.getenv("HUGGINGFACE_API_KEY")
+        
         # Import and initialize HuggingFaceService
         from services.huggingface_service import HuggingFaceService
         self.huggingface_service = HuggingFaceService()
         
-        # Add task parameter to the URL to specify sentiment-analysis
-        self.finbert_model_url = "https://api-inference.huggingface.co/models/matna449/my-finbert"
-        self.finbert_model_url_with_task = f"{self.finbert_model_url}?task=sentiment-analysis"
+        # Configure chunking parameters
         self.chunk_size = int(os.getenv("CHUNK_SIZE", "4000"))
         self.overlap_size = int(os.getenv("OVERLAP_SIZE", "200"))
         
         # Validate API key
-        self._validate_api_key()
+        self.is_api_key_valid = self._validate_api_key()
         
-        # Initialize tokenizer for chunking (if needed)
-        self.tokenizer = None
-        try:
-            # We'll use a simple character-based tokenizer for chunking
-            # No need to load the full model locally
-            logger.info("Using character-based chunking for FinBERT model")
-        except Exception as e:
-            logger.error(f"Error initializing tokenizer: {str(e)}")
+        logger.info("AIService initialized")
     
     def _validate_api_key(self):
-        """Validate the Hugging Face API key for FinBERT model."""
+        """
+        Validate the Hugging Face API key.
+        
+        Returns:
+            bool: True if the API key is valid, False otherwise
+        """
         self.is_api_key_valid = False
         
         if not self.huggingface_api_key:
             logger.warning("No Hugging Face API key provided in environment variables.")
-            return
+            return False
             
         if len(self.huggingface_api_key) < 8:  # Basic length check
             logger.warning("Hugging Face API key appears to be invalid (too short).")
-            return
+            return False
             
         # Test API key with a simple request to the FinBERT model
         try:
             headers = {"Authorization": f"Bearer {self.huggingface_api_key}"}
             # Use a simple test request to validate the API key
             response = requests.post(
-                self.finbert_model_url_with_task,  # Use URL with task parameter
+                "https://api-inference.huggingface.co/models/ProsusAI/finbert",
                 headers=headers,
                 json={"inputs": "The company reported strong financial results."},
                 timeout=5
@@ -66,7 +78,6 @@ class AIService:
             
             # Log response details for debugging
             logger.debug(f"FinBERT API validation - Status code: {response.status_code}")
-            logger.debug(f"FinBERT API validation - Response content: {response.text[:200]}")
             
             if response.status_code == 200:
                 self.is_api_key_valid = True
@@ -75,779 +86,350 @@ class AIService:
                 logger.error("Hugging Face API key is invalid for FinBERT model (401 Unauthorized).")
             else:
                 logger.warning(f"FinBERT API key validation returned status code: {response.status_code}")
-                logger.warning(response.text)
-                logger.warning(response)
-        except Exception as e:
-            logger.error(f"Error validating Hugging Face API key for FinBERT: {str(e)}")
-    
-    def _call_finbert_api(self, text: str, max_retries: int = 3) -> Dict[str, Any]:
-        """Make a call to the FinBERT API."""
-        if not self.is_api_key_valid:
-            logger.error("Cannot call FinBERT API: No valid API key configured")
-            raise ValueError("Hugging Face API key not configured or invalid")
-        
-        headers = {
-            "Authorization": f"Bearer {self.huggingface_api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {"inputs": text}
-        
-        logger.info(f"Calling FinBERT API with {len(text)} characters of text")
-        logger.debug(f"FinBERT API payload sample: {text[:100]}...")
-        
-        for attempt in range(max_retries):
-            try:
-                response = requests.post(
-                    self.finbert_model_url_with_task,  # Use URL with task parameter
-                    headers=headers, 
-                    json=payload, 
-                    timeout=30
-                )
-                
-                # Check for authentication errors
-                if response.status_code == 401:
-                    logger.error("Authentication failed: Invalid Hugging Face API key (401 Unauthorized)")
-                    self.is_api_key_valid = False  # Mark as invalid for future calls
-                    raise ValueError("Invalid Hugging Face API key (401 Unauthorized)")
-                
-                # Check if the model is still loading
-                if response.status_code == 503 and "Model is loading" in response.text:
-                    wait_time = min(2 ** attempt, 10)  # Exponential backoff
-                    logger.info(f"FinBERT model is loading. Waiting {wait_time} seconds before retry.")
-                    sleep(wait_time)
-                    continue
-                
-                # Check for service unavailability
-                if response.status_code == 503:
-                    logger.error(f"FinBERT API service unavailable (503). Attempt {attempt+1}/{max_retries}")
-                    if attempt < max_retries - 1:
-                        wait_time = min(2 ** attempt, 10)  # Exponential backoff
-                        logger.info(f"Waiting {wait_time} seconds before retry.")
-                        sleep(wait_time)
-                        continue
-                    else:
-                        logger.error("Maximum retries reached. Falling back to local processing.")
-                        raise requests.exceptions.RequestException("Service unavailable after maximum retries")
-                
-                # Check for token limit errors
-                if response.status_code == 400:
-                    error_text = response.text
-                    logger.error(f"FinBERT API request failed with 400 error: {error_text}")
-                    
-                    if "token" in error_text.lower() and "limit" in error_text.lower():
-                        # If it's a token limit issue, try to reduce the input size
-                        if len(text) > 512:  # Typical BERT token limit
-                            # Reduce input size by half for the next attempt
-                            reduced_text = text[:len(text)//2]
-                            logger.info(f"Reduced input size to {len(reduced_text)} characters for next attempt")
-                            return self._call_finbert_api(reduced_text, max_retries - attempt - 1)
-                
-                # Raise exception for other errors
-                response.raise_for_status()
-                
-                # Log successful response
-                logger.info(f"FinBERT API call successful")
-                return response.json()
             
-            except requests.exceptions.RequestException as e:
-                logger.error(f"FinBERT API request failed (attempt {attempt+1}/{max_retries}): {str(e)}")
-                if attempt == max_retries - 1:
-                    raise
-                sleep(1)  # Wait before retrying
-        
-        raise Exception("Failed to get response from FinBERT API after multiple attempts")
-    
-    def _chunk_text(self, text: str) -> List[str]:
-        """Split text into chunks for processing, respecting token limits."""
-        if not text:
-            return []
-        
-        # For BERT models, typical token limit is 512 tokens
-        # We'll use a conservative estimate of 400 tokens per chunk
-        # Assuming average of 4 characters per token for English text
-        char_per_token = 4
-        char_limit = 400 * char_per_token  # ~1600 characters per chunk
-        
-        chunks = []
-        start = 0
-        
-        while start < len(text):
-            end = min(start + char_limit, len(text))
-            
-            # If not at the end, try to break at a sentence boundary
-            if end < len(text):
-                # Look for sentence boundary within the last 20% of the chunk
-                boundary_search_start = max(start + int(char_limit * 0.8), start)
-                sentence_boundary = text.rfind('. ', boundary_search_start, end)
-                if sentence_boundary != -1:
-                    end = sentence_boundary + 2  # Include the period and space
-            
-            chunks.append(text[start:end])
-            
-            # Calculate next start position with overlap
-            overlap = min(self.overlap_size, char_limit // 10)  # 10% overlap by default
-            start = end - overlap if end - overlap > start else end
-        
-        logger.info(f"Split text into {len(chunks)} chunks for FinBERT processing")
-        return chunks
-    
-    def analyze_sentiment(self, text: str) -> Dict[str, Any]:
-        """Analyze sentiment in financial text."""
-        try:
-            logger.info(f"Analyzing sentiment in text ({len(text)} characters)")
-            
-            try:
-                # Use HuggingFaceService to perform sentiment analysis
-                sentiment_result = self.huggingface_service.analyze_sentiment(text)
-                logger.info(f"Sentiment analysis completed: {sentiment_result['sentiment']}")
-                return sentiment_result
-            except Exception as e:
-                logger.error(f"Error calling HuggingFaceService for sentiment analysis: {str(e)}")
-                return self._fallback_sentiment_analysis(text)
+            return self.is_api_key_valid
                 
         except Exception as e:
-            logger.error(f"Error in sentiment analysis: {str(e)}")
-            return self._fallback_sentiment_analysis(text)
-    
-    def _fallback_sentiment_analysis(self, text: str) -> Dict[str, Any]:
-        """Simple keyword-based sentiment analysis as fallback."""
-        text_lower = text.lower()
-        
-        positive_words = ['growth', 'increase', 'profit', 'success', 'positive', 'opportunity', 
-                         'improve', 'gain', 'strong', 'advantage', 'innovation', 'progress']
-        negative_words = ['decline', 'decrease', 'loss', 'risk', 'negative', 'challenge', 
-                         'difficult', 'weak', 'threat', 'problem', 'failure', 'concern']
-        
-        positive_count = sum(1 for word in positive_words if word in text_lower)
-        negative_count = sum(1 for word in negative_words if word in text_lower)
-        
-        if positive_count > negative_count:
-            sentiment = "positive"
-            explanation = "The text contains more positive financial keywords than negative ones."
-            score = min(0.5 + (positive_count - negative_count) * 0.05, 0.9)  # Scale to 0.5-0.9
-        elif negative_count > positive_count:
-            sentiment = "negative"
-            explanation = "The text contains more negative financial keywords than positive ones."
-            score = min(0.5 + (negative_count - positive_count) * 0.05, 0.9)  # Scale to 0.5-0.9
-        else:
-            sentiment = "neutral"
-            explanation = "The text contains a balanced mix of positive and negative financial keywords."
-            score = 0.5
-        
-        return {
-            "sentiment": sentiment,
-            "explanation": explanation,
-            "score": score
-        }
+            logger.error(f"Error validating API key: {str(e)}")
+            return False
     
     def extract_financial_metrics(self, text: str) -> List[Dict[str, Any]]:
-        """Extract financial metrics from text using FinBERT insights and regex patterns."""
-        try:
-            # First, try to extract metrics using regex patterns
-            regex_metrics = self._extract_metrics_with_regex(text)
+        """
+        Extract financial metrics from text using regex patterns.
+        
+        Args:
+            text: Financial text to analyze
             
-            # If we have a valid API key, enhance with FinBERT
-            if self.is_api_key_valid:
-                # Process text in chunks to avoid token limits
-                chunks = self._chunk_text(text)
-                all_metrics = list(regex_metrics)  # Start with regex metrics
-                
-                # Process first few chunks (financial highlights usually at beginning)
-                for i, chunk in enumerate(chunks[:3]):
-                    try:
-                        # Call FinBERT API
-                        response = self._call_finbert_api(chunk)
-                        
-                        # Use FinBERT sentiment to validate and enhance metrics
-                        if isinstance(response, list) and len(response) > 0:
-                            sentiment = response[0].get('label', 'neutral').lower()
-                            
-                            # Add sentiment context to metrics from this section
-                            for metric in regex_metrics:
-                                if "context" in metric and metric["context"] in chunk:
-                                    metric["sentiment"] = sentiment
-                            
-                            # If positive sentiment, mark metrics as more reliable
-                            if sentiment == "positive":
-                                for metric in regex_metrics:
-                                    if "context" in metric and metric["context"] in chunk:
-                                        metric["reliability"] = "high"
-                    except Exception as chunk_error:
-                        logger.error(f"Error processing chunk {i} with FinBERT: {str(chunk_error)}")
-                
-                return all_metrics
-            else:
-                # If no valid API key, just return regex metrics
-                return regex_metrics
-                
-        except Exception as e:
-            logger.error(f"Error extracting financial metrics: {str(e)}")
-            # Fallback to regex pattern matching
-            return self._extract_metrics_with_regex(text)
+        Returns:
+            List of dictionaries containing extracted metrics
+        """
+        logger.info(f"Extracting financial metrics from text of length {len(text)}")
+        
+        # Use the shared utility function to extract metrics
+        metrics = extract_metrics_with_regex(text)
+        
+        # Post-process metrics for consistency
+        processed_metrics = []
+        for metric in metrics:
+            # Standardize metric name and category
+            metric["name"] = self._determine_metric_name(metric["name"], metric.get("context", ""))
+            metric["category"] = self._determine_category(metric["category"])
+            metric["unit"] = self._standardize_unit(metric["unit"])
+            
+            processed_metrics.append(metric)
+        
+        logger.info(f"Extracted {len(processed_metrics)} financial metrics")
+        return processed_metrics
     
     def _determine_metric_name(self, name: str, context: str) -> str:
-        """Determine the standardized name for a financial metric based on context."""
+        """
+        Determine the standardized name for a financial metric.
+        
+        Args:
+            name: Original metric name
+            context: Context in which the metric appears
+            
+        Returns:
+            Standardized metric name
+        """
         name_lower = name.lower()
-        logger.debug(f"Determining metric name for: {name_lower}")
         
-        # EPS metrics - check this first to catch "earnings per share" before it matches "earnings" in profit
-        if 'eps' in name_lower or ('earning' in name_lower and 'per share' in name_lower):
-            logger.debug(f"Matched EPS category: 'eps' in name: {'eps' in name_lower}, 'earning' and 'per share' in name: {('earning' in name_lower and 'per share' in name_lower)}")
-            if 'diluted' in name_lower:
-                return 'Diluted EPS'
-            else:
-                return 'EPS'
+        # Revenue-related metrics
+        if "revenue" in name_lower:
+            if "total" in name_lower or "net" in name_lower:
+                return "Total Revenue"
+            return "Revenue"
+            
+        # Income-related metrics
+        if "net income" in name_lower:
+            return "Net Income"
+        if "income" in name_lower:
+            return "Income"
+            
+        # Profit-related metrics
+        if "gross profit" in name_lower:
+            return "Gross Profit"
+        if "operating profit" in name_lower:
+            return "Operating Profit"
+        if "profit" in name_lower:
+            return "Profit"
+            
+        # EPS-related metrics
+        if "earnings per share" in name_lower or "eps" in name_lower:
+            return "EPS"
+            
+        # Context-based determination
+        context_lower = context.lower()
+        if "revenue" in context_lower and name_lower in ["increase", "decrease"]:
+            return "Revenue Growth"
+        if "income" in context_lower and name_lower in ["increase", "decrease"]:
+            return "Income Growth"
         
-        # Revenue metrics
-        elif any(term in name_lower for term in ['revenue', 'sales', 'turnover']):
-            logger.debug(f"Matched revenue category")
-            if 'net' in name_lower:
-                return 'Net Revenue'
-            elif 'gross' in name_lower:
-                return 'Gross Revenue'
-            elif 'total' in name_lower:
-                return 'Total Revenue'
-            else:
-                return 'Revenue'
-        
-        # Profit metrics
-        elif any(term in name_lower for term in ['profit', 'income', 'earnings']):
-            logger.debug(f"Matched profit category")
-            if 'net' in name_lower:
-                return 'Net Income'
-            elif 'gross' in name_lower:
-                return 'Gross Profit'
-            elif 'operating' in name_lower:
-                return 'Operating Income'
-            else:
-                return 'Profit'
-        
-        # Asset metrics
-        elif 'asset' in name_lower:
-            logger.debug(f"Matched asset category")
-            if 'total' in name_lower:
-                return 'Total Assets'
-            else:
-                return 'Assets'
-        
-        # Liability metrics
-        elif 'liabilit' in name_lower:
-            logger.debug(f"Matched liability category")
-            if 'total' in name_lower:
-                return 'Total Liabilities'
-            else:
-                return 'Liabilities'
-        
-        # Cash metrics
-        elif 'cash' in name_lower:
-            logger.debug(f"Matched cash category")
-            if 'flow' in name_lower:
-                return 'Cash Flow'
-            else:
-                return 'Cash'
-        
-        # Growth metrics
-        elif 'growth' in name_lower:
-            logger.debug(f"Matched growth category")
-            if 'revenue' in name_lower or 'sales' in name_lower:
-                return 'Revenue Growth'
-            else:
-                return 'Growth'
-        
-        # Margin metrics
-        elif 'margin' in name_lower:
-            logger.debug(f"Matched margin category")
-            if 'gross' in name_lower:
-                return 'Gross Margin'
-            elif 'operating' in name_lower:
-                return 'Operating Margin'
-            elif 'net' in name_lower:
-                return 'Net Margin'
-            else:
-                return 'Margin'
-        
-        # Return metrics
-        elif 'return' in name_lower or 'roi' in name_lower or 'roe' in name_lower or 'roa' in name_lower:
-            logger.debug(f"Matched return category")
-            if 'equity' in name_lower or 'roe' in name_lower:
-                return 'ROE'
-            elif 'asset' in name_lower or 'roa' in name_lower:
-                return 'ROA'
-            elif 'investment' in name_lower or 'roi' in name_lower:
-                return 'ROI'
-            else:
-                return 'Return'
-        
-        # Market cap
-        elif 'market' in name_lower and ('cap' in name_lower or 'capitalization' in name_lower):
-            logger.debug(f"Matched market cap category")
-            return 'Market Cap'
-        
-        # Dividend metrics
-        elif 'dividend' in name_lower:
-            logger.debug(f"Matched dividend category")
-            if 'yield' in name_lower:
-                return 'Dividend Yield'
-            else:
-                return 'Dividend'
-        
-        # Default: return the original name with first letter capitalized
-        return name.strip().capitalize()
+        # Return the original name with proper capitalization
+        return name.title()
     
     def _standardize_unit(self, unit: str) -> str:
-        """Standardize unit format."""
+        """
+        Standardize the unit for a financial metric.
+        
+        Args:
+            unit: Original unit string
+            
+        Returns:
+            Standardized unit string
+        """
         if not unit:
             return ""
             
-        unit_lower = unit.lower()
+        unit_lower = unit.lower().strip()
         
-        # Handle currency units
-        if 'million' in unit_lower or 'm' == unit_lower:
-            return 'million'
-        elif 'billion' in unit_lower or 'b' == unit_lower:
-            return 'billion'
-        elif 'trillion' in unit_lower or 't' == unit_lower:
-            return 'trillion'
-        
-        # Handle percentage
-        elif '%' in unit_lower or 'percent' in unit_lower:
-            return '%'
-        
-        # Handle currency symbols
-        elif '$' in unit or 'usd' in unit_lower:
-            return 'USD'
-        elif '€' in unit or 'eur' in unit_lower:
-            return 'EUR'
-        elif '£' in unit or 'gbp' in unit_lower:
-            return 'GBP'
-        
-        # Return original if no match
-        return unit.strip()
+        # Standardize abbreviations
+        if unit_lower in ["m", "mil", "million"]:
+            return "million"
+        if unit_lower in ["b", "bil", "billion"]:
+            return "billion"
+        if unit_lower in ["k", "thousand"]:
+            return "thousand"
+        if unit_lower in ["t", "trillion"]:
+            return "trillion"
+            
+        # Currency symbols
+        if unit_lower in ["$", "usd"]:
+            return "USD"
+        if unit_lower in ["€", "eur"]:
+            return "EUR"
+        if unit_lower in ["£", "gbp"]:
+            return "GBP"
+        if unit_lower in ["¥", "jpy", "cny"]:
+            return "JPY"
+            
+        # Percentages
+        if unit_lower in ["%", "percent", "percentage"]:
+            return "%"
+            
+        # Return the original unit if not recognized
+        return unit
     
     def _determine_category(self, category: str) -> str:
-        """Determine the category of a financial metric."""
-        # Map raw categories to standardized categories
-        category_map = {
-            'revenue': 'income_statement',
-            'profit': 'income_statement',
-            'eps': 'income_statement',
-            'income': 'income_statement',
-            'margin': 'profitability',
-            'growth': 'growth',
-            'assets': 'balance_sheet',
-            'liabilities': 'balance_sheet',
-            'equity': 'balance_sheet',
-            'cash_flow': 'cash_flow',
-            'return': 'profitability',
-            'dividend': 'shareholder_returns',
-            'market_cap': 'valuation'
-        }
+        """
+        Determine the standardized category for a financial metric.
         
-        # Return mapped category or default to 'financial'
-        return category_map.get(category.lower(), 'financial')
-    
-    def _extract_metrics_with_regex(self, text: str) -> List[Dict[str, Any]]:
-        """Extract financial metrics using regex patterns."""
-        metrics = []
-        
-        # Debug: Print the text we're analyzing
-        logger.debug(f"Analyzing text for metrics (length: {len(text)})")
-        logger.debug(f"Text sample: {text[:200]}...")
-        
-        # Define regex patterns for different financial metrics
-        patterns = {
-            'revenue': [
-                r'(?:total|net|annual)?\s*revenue\s*(?:of|:|\s+was|\s+is|\s+reached)?\s*(?:\$|€|£)?(\d[\d\.,]+)\s*(million|billion|trillion|m|b|t|USD|EUR|GBP)?',
-                r'(?:total|net|annual)?\s*sales\s*(?:of|:|\s+was|\s+is|\s+reached)?\s*(?:\$|€|£)?(\d[\d\.,]+)\s*(million|billion|trillion|m|b|t|USD|EUR|GBP)?'
-            ],
-            'profit': [
-                r'(?:net|gross|operating)?\s*(?:income|profit|earnings)\s*(?:of|:|\s+was|\s+is|\s+reached)?\s*(?:\$|€|£)?(\d[\d\.,]+)\s*(million|billion|trillion|m|b|t|USD|EUR|GBP)?',
-                r'(?:net|gross|operating)?\s*(?:income|profit|earnings)\s*(?:of|:|\s+was|\s+is|\s+reached)?\s*(?:\$|€|£)?(\d[\d\.,]+)\s*(million|billion|trillion|m|b|t|USD|EUR|GBP)?'
-            ],
-            'eps': [
-                r'(?:diluted|basic)?\s*(?:earnings per share|EPS)(?:\s*\(EPS\))?\s*(?:of|:|\s+was|\s+is|\s+reached|compared to)?\s*(?:\$|€|£)?(\d[\d\.,]+)',
-                r'(?:diluted|basic)?\s*(?:EPS|earnings per share)\s*(?:of|:|\s+was|\s+is|\s+reached)?\s*(?:\$|€|£)?(\d[\d\.,]+)',
-                r'EPS\s*(?::|was|of|\(diluted\))?\s*(?:\$|€|£)?(\d[\d\.,]+)',
-                r'earnings per share\s*\(eps\):\s*(?:\$|€|£)?(\d[\d\.,]+)'
-            ],
-            'assets': [
-                r'(?:total)?\s*assets\s*(?:of|:|\s+was|\s+is|\s+reached)?\s*(?:\$|€|£)?(\d[\d\.,]+)\s*(million|billion|trillion|m|b|t|USD|EUR|GBP)?'
-            ],
-            'liabilities': [
-                r'(?:total)?\s*liabilities\s*(?:of|:|\s+was|\s+is|\s+reached)?\s*(?:\$|€|£)?(\d[\d\.,]+)\s*(million|billion|trillion|m|b|t|USD|EUR|GBP)?'
-            ],
-            'market_cap': [
-                r'(?:market\s*cap|market\s*capitalization)\s*(?:of|:|\s+was|\s+is|\s+reached)?\s*(?:\$|€|£)?(\d[\d\.,]+)\s*(million|billion|trillion|m|b|t|USD|EUR|GBP)?'
-            ],
-            'growth': [
-                r'(?:revenue|sales|profit|income)?\s*growth\s*(?:of|:|\s+was|\s+is|\s+at)?\s*(\d[\d\.,]+)\s*(%|percent)',
-                r'(?:grew|increased|decreased)\s*by\s*(\d[\d\.,]+)\s*(%|percent)'
-            ],
-            'margin': [
-                r'(?:gross|operating|net|profit)?\s*margin\s*(?:of|:|\s+was|\s+is|\s+at)?\s*(\d[\d\.,]+)\s*(%|percent)'
-            ],
-            'dividend': [
-                r'dividend\s*(?:of|:|\s+was|\s+is|\s+at)?\s*(?:\$|€|£)?(\d[\d\.,]+)\s*(per\s*share|USD|EUR|GBP)?',
-                r'dividend\s*yield\s*(?:of|:|\s+was|\s+is|\s+at)?\s*(\d[\d\.,]+)\s*(%|percent)'
-            ],
-            'cash_flow': [
-                r'(?:operating|free)?\s*cash\s*flow\s*(?:of|:|\s+was|\s+is|\s+reached)?\s*(?:\$|€|£)?(\d[\d\.,]+)\s*(million|billion|trillion|m|b|t|USD|EUR|GBP)?'
-            ],
-            'return': [
-                r'(?:return\s*on\s*(?:equity|assets|investment)|ROE|ROA|ROI)\s*(?:of|:|\s+was|\s+is|\s+at)?\s*(\d[\d\.,]+)\s*(%|percent)',
-                r'return\s*on\s*equity\s*\(roe\):\s*(\d[\d\.,]+)\s*(%|percent)?'
-            ]
-        }
-        
-        # Log the patterns we're searching for
-        logger.debug(f"Searching for {len(patterns)} types of financial metrics")
-        
-        # Search for each pattern in the text
-        for category, category_patterns in patterns.items():
-            for pattern in category_patterns:
-                logger.debug(f"Trying pattern for {category}: {pattern}")
-                matches = re.finditer(pattern, text, re.IGNORECASE)
-                for match in matches:
-                    logger.debug(f"Found match for {category}: {match.group(0)}")
-                    # Extract the value and unit
-                    value = match.group(1).replace(',', '')
-                    unit = ""
-                    if match.lastindex and match.lastindex > 1:
-                        unit = match.group(2) if match.group(2) else ""
-                    
-                    # Get the context (text around the match)
-                    start = max(0, match.start() - 50)
-                    end = min(len(text), match.end() + 50)
-                    context = text[start:end]
-                    
-                    # Determine metric name based on match and context
-                    full_match_text = match.group(0)
-                    logger.debug(f"Full match text for {category}: {full_match_text}")
-                    # For EPS, use the full match text to determine the name
-                    if 'eps' in full_match_text.lower() or ('earnings' in full_match_text.lower() and 'per share' in full_match_text.lower()):
-                        logger.debug(f"Using full match text for EPS: {full_match_text}")
-                        metric_name = self._determine_metric_name(full_match_text, context)
-                    else:
-                        # For other metrics, use the first word as before
-                        logger.debug(f"Using first word for {category}: {full_match_text.split()[0]}")
-                        metric_name = self._determine_metric_name(full_match_text.split()[0], context)
-                    
-                    logger.debug(f"Determined metric name: {metric_name}")
-                    
-                    # Standardize unit format
-                    standardized_unit = self._standardize_unit(unit)
-                    
-                    # Create metric object
-                    metric = {
-                        "name": metric_name,
-                        "value": value,
-                        "unit": standardized_unit,
-                        "category": self._determine_category(category),
-                        "context": context
-                    }
-                    
-                    metrics.append(metric)
-                    logger.debug(f"Found metric: {metric_name} = {value} {standardized_unit}")
-        
-        # Look for table-like patterns (e.g., "Revenue | $10.5B")
-        table_pattern = r'([A-Za-z\s]+)\s*[\|\:\t]\s*(?:\$|€|£)?(\d[\d\.,]+)\s*(million|billion|trillion|m|b|t|USD|EUR|GBP|%|percent)?'
-        table_matches = re.finditer(table_pattern, text)
-        
-        for match in table_matches:
-            name = match.group(1).strip()
-            value = match.group(2).replace(',', '')
-            unit = match.group(3) if match.group(3) else ""
+        Args:
+            category: Original category string
             
-            # Skip if name is too short or generic
-            if len(name) < 3 or name.lower() in ['the', 'and', 'for', 'year', 'quarter', 'period']:
-                continue
-                
-            # Get context
-            start = max(0, match.start() - 30)
-            end = min(len(text), match.end() + 30)
-            context = text[start:end]
+        Returns:
+            Standardized category string
+        """
+        if not category:
+            return "Other"
             
-            # Determine category based on name
-            category = "financial"
-            for cat_name, cat_patterns in patterns.items():
-                if any(term in name.lower() for term in cat_name.split('_')):
-                    category = cat_name
-                    break
-            
-            # Create metric object
-            metric = {
-                "name": self._determine_metric_name(name, context),
-                "value": value,
-                "unit": self._standardize_unit(unit),
-                "category": self._determine_category(category),
-                "context": context
-            }
-            
-            metrics.append(metric)
+        category_lower = category.lower()
         
-        logger.info(f"Extracted {len(metrics)} financial metrics using regex patterns")
-        return metrics
+        # Standardize common categories
+        if "income" in category_lower or "revenue" in category_lower:
+            return "Income Statement"
+        if "balance" in category_lower or "asset" in category_lower:
+            return "Balance Sheet"
+        if "cash" in category_lower or "flow" in category_lower:
+            return "Cash Flow"
+        if "ratio" in category_lower:
+            return "Financial Ratios"
+            
+        # Return the original category with proper capitalization
+        return category.title()
     
     def extract_risk_factors(self, text: str) -> List[str]:
-        """Extract risk factors from text using FinBERT model or pattern matching."""
+        """
+        Extract risk factors from financial text.
+        
+        Args:
+            text: Financial text to analyze
+            
+        Returns:
+            List of extracted risk factors
+        """
+        logger.info(f"Extracting risk factors from text of length {len(text)}")
+        
         try:
-            # First try to extract risk factors using regex patterns
-            regex_risks = self._extract_risks_with_regex(text)
-            
-            # If we have a valid API key, enhance with FinBERT
+            # Delegate to HuggingFaceService for risk analysis
             if self.is_api_key_valid:
-                # Process text in chunks to avoid token limits
-                chunks = self._chunk_text(text)
-                all_risks = list(regex_risks)  # Start with regex risks
-                
-                # Process chunks (focus on middle sections where risks are typically found)
-                start_idx = min(3, len(chunks) // 3)  # Skip first few chunks (usually intro)
-                end_idx = min(start_idx + 5, len(chunks))  # Process ~5 chunks in the middle
-                
-                for i, chunk in enumerate(chunks[start_idx:end_idx]):
-                    try:
-                        # Call FinBERT API
-                        response = self._call_finbert_api(chunk)
-                        
-                        # Use FinBERT sentiment to identify potential risk sections
-                        if isinstance(response, list) and len(response) > 0:
-                            sentiment = response[0].get('label', 'neutral').lower()
-                            score = response[0].get('score', 0.0)
-                            
-                            # Negative sentiment sections are more likely to contain risks
-                            if sentiment == "negative" and score > 0.6:
-                                # Extract sentences that might contain risks
-                                sentences = re.split(r'(?<=[.!?])\s+', chunk)
-                                for sentence in sentences:
-                                    # Look for risk-related keywords in sentences
-                                    if any(keyword in sentence.lower() for keyword in [
-                                        'risk', 'threat', 'challenge', 'uncertainty', 'concern',
-                                        'adverse', 'negative', 'decline', 'decrease', 'loss',
-                                        'litigation', 'regulatory', 'compliance', 'failure'
-                                    ]):
-                                        # Clean up the sentence
-                                        risk = sentence.strip()
-                                        if risk and len(risk) > 20 and risk not in all_risks:
-                                            all_risks.append(risk)
-                    except Exception as chunk_error:
-                        logger.error(f"Error processing chunk {i} with FinBERT for risk extraction: {str(chunk_error)}")
-                
-                return all_risks
-            else:
-                # If no valid API key, just return regex risks
-                return regex_risks
-                
+                risk_analysis = self.huggingface_service.analyze_risk(text)
+                risks = risk_analysis.get("risks", [])
+                logger.info(f"Extracted {len(risks)} risk factors using HuggingFace models")
+                return risks
         except Exception as e:
-            logger.error(f"Error extracting risk factors: {str(e)}")
-            # Fallback to regex pattern matching
-            return self._extract_risks_with_regex(text)
-    
-    def _extract_risks_with_regex(self, text: str) -> List[str]:
-        """Extract risk factors using regex patterns."""
-        risks = []
+            logger.error(f"Error using HuggingFace for risk factor extraction: {str(e)}")
         
-        # Look for sections that might contain risk factors
-        risk_section_patterns = [
-            r'(?i)Risk\s+Factors.*?(?=\n\n\w+|\Z)',
-            r'(?i)Risks\s+and\s+Uncertainties.*?(?=\n\n\w+|\Z)',
-            r'(?i)Principal\s+Risks.*?(?=\n\n\w+|\Z)',
-            r'(?i)Key\s+Risks.*?(?=\n\n\w+|\Z)'
-        ]
-        
-        # Extract risk sections
-        risk_sections = []
-        for pattern in risk_section_patterns:
-            matches = re.finditer(pattern, text, re.DOTALL)
-            for match in matches:
-                risk_sections.append(match.group(0))
-        
-        # If we found risk sections, extract individual risks
-        if risk_sections:
-            combined_section = "\n".join(risk_sections)
-            
-            # Extract bullet points or numbered items
-            bullet_patterns = [
-                r'•\s*(.*?)(?=•|\n\n|\Z)',
-                r'[\n\r]\d+\.\s*(.*?)(?=[\n\r]\d+\.|\n\n|\Z)',
-                r'[\n\r][-–]\s*(.*?)(?=[\n\r][-–]|\n\n|\Z)'
-            ]
-            
-            for pattern in bullet_patterns:
-                matches = re.finditer(pattern, combined_section, re.DOTALL)
-                for match in matches:
-                    risk = match.group(1).strip()
-                    if risk and len(risk) > 20 and risk not in risks:  # Avoid short or duplicate entries
-                        risks.append(risk)
-        
-        # If no structured risk sections found, look for sentences containing risk keywords
-        if not risks:
-            sentences = re.split(r'(?<=[.!?])\s+', text)
-            for sentence in sentences:
-                if any(keyword in sentence.lower() for keyword in [
-                    'risk', 'threat', 'challenge', 'uncertainty', 'concern',
-                    'adverse', 'negative', 'decline', 'decrease', 'loss',
-                    'litigation', 'regulatory', 'compliance', 'failure'
-                ]):
-                    risk = sentence.strip()
-                    if risk and len(risk) > 20 and risk not in risks:
-                        risks.append(risk)
-        
-        logger.info(f"Extracted {len(risks)} risk factors using regex patterns")
-        return risks[:10]  # Limit to top 10 risks
+        # Fallback to regex-based extraction
+        risks = extract_risk_factors_with_regex(text)
+        logger.info(f"Extracted {len(risks)} risk factors using fallback regex method")
+        return risks
     
     def generate_business_outlook(self, text: str) -> str:
-        """Generate a business outlook summary using Hugging Face or fallback method."""
-        try:
-            if self.text_generation:
-                prompt = f"Summarize the business outlook, strategic plans, and growth expectations from this text: {text[:1000]}"
-                
-                response = self.text_generation(prompt, max_length=300, do_sample=False)[0]['generated_text']
-                return response.strip()
-            else:
-                # Fallback to extractive method
-                return self._extract_outlook_statements(text)
-                
-        except Exception as e:
-            logger.error(f"Error generating business outlook: {str(e)}")
-            return self._extract_outlook_statements(text)
+        """
+        Generate a business outlook summary from financial text.
+        
+        Args:
+            text: Financial text to analyze
+            
+        Returns:
+            Business outlook summary
+        """
+        logger.info(f"Generating business outlook from text of length {len(text)}")
+        
+        # Extract outlook statements using regex patterns
+        outlook = self._extract_outlook_statements(text)
+        
+        if not outlook:
+            # Use HuggingFaceService if available
+            try:
+                summary = self.huggingface_service.generate_summary(text)
+                outlook = summary.get("summary", "")
+                if outlook:
+                    logger.info(f"Generated business outlook using HuggingFace models")
+                    return outlook
+            except Exception as e:
+                logger.error(f"Error generating business outlook with HuggingFace: {str(e)}")
+        
+        logger.info(f"Generated business outlook of length {len(outlook)}")
+        return outlook
     
     def _extract_outlook_statements(self, text: str) -> str:
-        """Extract outlook statements using pattern matching."""
+        """
+        Extract outlook statements from financial text using regex patterns.
+        
+        Args:
+            text: Financial text to analyze
+            
+        Returns:
+            Extracted outlook statements as a string
+        """
+        # Look for outlook section headers
+        outlook_headers = [
+            r'business outlook',
+            r'future outlook',
+            r'outlook',
+            r'forward[ -]looking statements',
+            r'future prospects',
+            r'guidance'
+        ]
+        
+        # Extract text after outlook headers
         outlook_statements = []
+        for header in outlook_headers:
+            pattern = re.compile(f'(?i){header}[:\\s]+(.*?)(?=\\n\\n|\\.$)', re.DOTALL)
+            matches = pattern.findall(text)
+            outlook_statements.extend(matches)
         
-        # Look for outlook section
-        outlook_section_pattern = r'(?i)(Outlook|Future Prospects|Forward-Looking Statements|Strategic Priorities|Future Plans).*?(?=\n\s*\n|$)'
-        outlook_section_match = re.search(outlook_section_pattern, text, re.DOTALL)
-        
-        if outlook_section_match:
-            outlook_section = outlook_section_match.group(0)
-            sentences = re.split(r'(?<=[.!?])\s+', outlook_section)
-            outlook_statements = sentences[:5]  # Take first 5 sentences
-        
-        # If no structured outlook found, look for outlook-related sentences
+        # If no headers found, look for outlook keywords in sentences
         if not outlook_statements:
-            sentences = re.split(r'(?<=[.!?])\s+', text)
-            for sentence in sentences:
-                if len(sentence) > 30 and any(word in sentence.lower() for word in ['future', 'plan', 'expect', 'strategy', 'growth', 'outlook', 'anticipate']):
-                    outlook_statements.append(sentence.strip())
-                    if len(outlook_statements) >= 5:
-                        break
-        
-        return " ".join(outlook_statements)
-    
-    def answer_question(self, question: str, context: str) -> str:
-        """Answer a specific question based on the provided context."""
-        try:
-            if self.qa_pipeline:
-                result = self.qa_pipeline(question=question, context=context[:self.chunk_size])
-                return result['answer']
-            else:
-                # Simple fallback
-                return "Question answering is not available without the Hugging Face model."
-        except Exception as e:
-            logger.error(f"Error answering question: {str(e)}")
-            return "Error processing question."
-    
-    def generate_summary(self, text: str, summary_type: str = "executive") -> str:
-        """Generate a summary of the text using FinBERT insights."""
-        try:
-            if not self.is_api_key_valid:
-                logger.warning("No valid API key for FinBERT, using fallback summary method")
-                return self._fallback_summary(text, summary_type)
-            
-            # Limit text to first 2000 characters for executive summary
-            # or middle 2000 characters for business outlook
-            if summary_type == "executive":
-                text_to_summarize = text[:2000]
-                prompt = "Provide a concise executive summary of this financial report section:"
-            else:  # business outlook
-                # Take text from middle of document for business outlook
-                middle_start = max(0, len(text) // 3)
-                middle_end = min(len(text), middle_start + 2000)
-                text_to_summarize = text[middle_start:middle_end]
-                prompt = "Summarize the business outlook and future prospects from this financial report section:"
-            
-            # We'll use FinBERT for sentiment analysis, but need to create our own summary
-            # based on key sentences from the text
-            
-            # First, get sentiment from FinBERT
-            sentiment_result = self.analyze_sentiment(text_to_summarize)
-            sentiment = sentiment_result["sentiment"]
-            
-            # Extract key sentences based on financial keywords
-            sentences = re.split(r'(?<=[.!?])\s+', text_to_summarize)
-            key_sentences = []
-            
-            # Keywords relevant to financial reports
-            financial_keywords = [
-                'revenue', 'profit', 'growth', 'increase', 'decrease', 'market',
-                'sales', 'earnings', 'performance', 'outlook', 'forecast',
-                'strategy', 'investment', 'dividend', 'shareholder', 'future',
-                'expansion', 'acquisition', 'innovation', 'technology', 'competitive'
+            outlook_keywords = [
+                r'expect[s]? to',
+                r'anticipate[s]?',
+                r'project[s]?',
+                r'forecast[s]?',
+                r'guidance',
+                r'outlook',
+                r'future',
+                r'coming year',
+                r'next year'
             ]
             
-            # Score sentences based on keyword presence
-            scored_sentences = []
+            sentences = re.split(r'(?<=[.!?])\s+', text)
             for sentence in sentences:
-                if len(sentence.split()) < 5:  # Skip very short sentences
-                    continue
-                    
-                score = sum(1 for keyword in financial_keywords if keyword in sentence.lower())
-                if score > 0:
-                    scored_sentences.append((sentence, score))
+                if any(re.search(f'(?i){keyword}', sentence) for keyword in outlook_keywords):
+                    outlook_statements.append(sentence)
+        
+        # Combine all outlook statements
+        outlook = " ".join(outlook_statements)
+        return outlook
+    
+    def generate_summary(self, text: str, summary_type: str = "executive") -> str:
+        """
+        Generate a summary of financial text.
+        
+        Args:
+            text: Financial text to summarize
+            summary_type: Type of summary to generate ("executive", "brief", etc.)
             
-            # Sort by score and take top sentences
-            scored_sentences.sort(key=lambda x: x[1], reverse=True)
-            key_sentences = [s[0] for s in scored_sentences[:5]]
+        Returns:
+            Generated summary as a string
+        """
+        logger.info(f"Generating {summary_type} summary for text of length {len(text)}")
+        
+        try:
+            # Extract metrics to include in the summary
+            metrics = self.extract_financial_metrics(text)
             
-            # Create summary
-            if key_sentences:
-                summary = " ".join(key_sentences)
-                
-                # Add sentiment context
-                if sentiment == "positive":
-                    summary += " Overall, the report indicates a positive financial outlook."
-                elif sentiment == "negative":
-                    summary += " Overall, the report indicates some financial challenges ahead."
-                else:
-                    summary += " Overall, the report presents a balanced financial picture."
-                
+            # Use HuggingFaceService to generate the summary
+            summary_result = self.huggingface_service.generate_summary(text, metrics)
+            summary = summary_result.get("summary", "")
+            
+            if summary:
+                logger.info(f"Generated {summary_type} summary of length {len(summary)} using HuggingFace")
                 return summary
-            else:
-                return self._fallback_summary(text, summary_type)
-                
         except Exception as e:
-            logger.error(f"Error generating {summary_type} summary: {str(e)}")
-            return self._fallback_summary(text, summary_type)
+            logger.error(f"Error generating summary with HuggingFace: {str(e)}")
+        
+        # Fallback to extractive summarization
+        summary = self._fallback_summary(text, summary_type)
+        logger.info(f"Generated {summary_type} summary of length {len(summary)} using fallback method")
+        return summary
     
     def _fallback_summary(self, text: str, summary_type: str) -> str:
-        """Generate a simple extractive summary as fallback."""
+        """
+        Generate a fallback summary when model-based summarization fails.
+        
+        Args:
+            text: Text to summarize
+            summary_type: Type of summary to generate
+            
+        Returns:
+            Extractive summary
+        """
+        logger.info(f"Using fallback method for {summary_type} summary generation")
+        
+        # Split into sentences
         sentences = re.split(r'(?<=[.!?])\s+', text)
         
-        if len(sentences) <= 3:
-            return text
-        
+        # Define important keywords based on summary type
         if summary_type == "executive":
-            # For executive summary, take first 2 sentences and last sentence
-            summary = " ".join(sentences[:2] + [sentences[-1]])
-        else:  # business outlook
-            # For business outlook, look for sentences with future-oriented terms
-            future_terms = ['will', 'plan', 'expect', 'future', 'outlook', 'forecast', 
-                           'anticipate', 'strategy', 'growth', 'target', 'goal']
-            
-            future_sentences = []
-            for sentence in sentences:
-                if any(term in sentence.lower() for term in future_terms):
-                    future_sentences.append(sentence)
-            
-            if future_sentences:
-                summary = " ".join(future_sentences[:3])  # Take up to 3 future-oriented sentences
-            else:
-                # Fallback to middle and last sentences
-                middle_idx = len(sentences) // 2
-                summary = " ".join([sentences[middle_idx], sentences[-1]])
+            important_keywords = [
+                "key", "important", "significant", "highlight", "executive", "summary",
+                "revenue", "profit", "growth", "increase", "decrease", "performance",
+                "fiscal year", "quarter", "annual", "financial", "earnings"
+            ]
+        elif summary_type == "brief":
+            important_keywords = [
+                "summary", "overview", "brief", "highlight",
+                "report", "financial", "statement"
+            ]
+        else:
+            important_keywords = [
+                "key", "important", "significant", "highlight", "summary", "report", "financial"
+            ]
         
+        # Score sentences based on importance
+        sentence_scores = []
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if len(sentence) < 10 or len(sentence) > 200:
+                continue
+                
+            score = 0
+            for keyword in important_keywords:
+                if keyword in sentence.lower():
+                    score += 1
+            
+            sentence_scores.append((sentence, score))
+        
+        # Sort by score and take top sentences
+        sentence_scores.sort(key=lambda x: x[1], reverse=True)
+        num_sentences = 10 if summary_type == "executive" else 5
+        top_sentences = [s[0] for s in sentence_scores[:num_sentences]]
+        
+        # Combine into summary
+        summary = " ".join(top_sentences)
         return summary
     
     def analyze_financial_text(self, text: str) -> Dict[str, Any]:
@@ -881,15 +463,15 @@ class AIService:
             logger.error(f"Error extracting financial metrics: {str(e)}")
             component_errors["metrics"] = True
         
-        # Generate executive summary using the new Mistral-based method
+        # Generate executive summary using HuggingFaceService
         executive_summary = {}
         try:
             executive_summary = self.huggingface_service.generate_summary(text, metrics)
-            logger.info(f"Generated executive summary using Mistral: {len(executive_summary.get('summary', ''))} characters")
+            logger.info(f"Generated executive summary using HuggingFace: {len(executive_summary.get('summary', ''))} characters")
         except Exception as e:
-            logger.error(f"Error generating executive summary with Mistral: {str(e)}")
+            logger.error(f"Error generating executive summary with HuggingFace: {str(e)}")
             component_errors["executive_summary"] = True
-            # Fallback to old method if needed
+            # Fallback to traditional method
             try:
                 executive_summary = {"summary": self.generate_summary(text, "executive")}
                 logger.info(f"Generated executive summary using fallback method: {len(executive_summary.get('summary', ''))} characters")
@@ -905,7 +487,7 @@ class AIService:
             logger.error(f"Error generating business outlook: {str(e)}")
             component_errors["business_outlook"] = True
         
-        # Analyze sentiment
+        # Analyze sentiment using HuggingFaceService
         sentiment = {}
         try:
             sentiment = self.huggingface_service.analyze_sentiment(text)
@@ -913,7 +495,7 @@ class AIService:
         except Exception as e:
             logger.error(f"Error analyzing sentiment: {str(e)}")
             component_errors["sentiment"] = True
-            sentiment = self._fallback_sentiment_analysis(text)
+            sentiment = fallback_sentiment_analysis(text)
         
         # Extract entities using HuggingFaceService
         entities = {}
@@ -924,6 +506,7 @@ class AIService:
         except Exception as e:
             logger.error(f"Error extracting entities: {str(e)}")
             component_errors["entities"] = True
+            entities = extract_basic_entities(text)
         
         # Process risk analysis
         risk_analysis = {}
@@ -932,6 +515,8 @@ class AIService:
             logger.info(f"Risk analysis completed")
         except Exception as e:
             logger.error(f"Error in risk analysis: {str(e)}")
+            component_errors["risk_analysis"] = True
+            risk_analysis = {"risks": self.extract_risk_factors(text)}
         
         # Return analysis results
         return {
@@ -952,16 +537,36 @@ class AIService:
         }
     
     def analyze_report(self, report_text: str) -> Dict[str, Any]:
-        """Analyze a financial report and extract insights."""
+        """
+        Analyze a financial report and extract insights.
+        
+        Args:
+            report_text: Text of the financial report
+            
+        Returns:
+            Dictionary with analysis results
+        """
         start_time = time.time()
         logger.info(f"Starting report analysis ({len(report_text)} characters)")
         
         try:
             # Check if API key is valid
             if not self.is_api_key_valid:
-                logger.warning("No valid Hugging Face API key. Using fallback methods.")
+                logger.warning("No valid Hugging Face API key. Using comprehensive fallback methods.")
+                analysis_result = self._comprehensive_fallback_analysis(report_text)
+                
+                # Calculate processing time
+                processing_time = time.time() - start_time
+                logger.info(f"Report analysis completed in {processing_time:.2f} seconds (using fallback methods)")
+                
+                # Add processing metadata
+                analysis_result["processing_time"] = f"{processing_time:.2f} seconds"
+                analysis_result["processing_date"] = datetime.now().isoformat()
+                analysis_result["model_used"] = "fallback methods"
+                
+                return analysis_result
             
-            # Analyze the report text
+            # If API key is valid, proceed with normal analysis
             analysis_result = self.analyze_financial_text(report_text)
             
             # Calculate processing time
@@ -971,7 +576,7 @@ class AIService:
             # Add processing metadata
             analysis_result["processing_time"] = f"{processing_time:.2f} seconds"
             analysis_result["processing_date"] = datetime.now().isoformat()
-            analysis_result["model_used"] = "matna449/my-finbert" if self.is_api_key_valid else "fallback methods"
+            analysis_result["model_used"] = "matna449/my-finbert"
             
             return analysis_result
             
@@ -979,50 +584,210 @@ class AIService:
             logger.error(f"Error analyzing report: {str(e)}")
             processing_time = time.time() - start_time
             
-            # Return error result with as much information as possible
-            return {
-                "status": "error",
-                "message": f"Error analyzing report: {str(e)}",
-                "metrics": [],
-                "risks": [],
-                "executive_summary": "",
-                "business_outlook": "",
-                "sentiment": {"sentiment": "neutral", "explanation": "Analysis failed"},
-                "processing_time": f"{processing_time:.2f} seconds",
-                "processing_date": datetime.now().isoformat(),
-                "model_used": "matna449/my-finbert" if self.is_api_key_valid else "fallback methods"
-            }
+            # Try fallback methods if main analysis fails
+            try:
+                logger.info("Main analysis failed, attempting fallback analysis")
+                fallback_result = self._comprehensive_fallback_analysis(report_text)
+                fallback_result["status"] = "partial"
+                fallback_result["error_info"] = f"Primary analysis failed: {str(e)}"
+                fallback_result["processing_time"] = f"{processing_time:.2f} seconds"
+                fallback_result["processing_date"] = datetime.now().isoformat()
+                fallback_result["model_used"] = "fallback methods (after primary failure)"
+                
+                return fallback_result
+            except Exception as fallback_error:
+                logger.error(f"Fallback analysis also failed: {str(fallback_error)}")
+                
+                # Return error result with as much information as possible
+                return {
+                    "status": "error",
+                    "message": f"Error analyzing report: {str(e)}",
+                    "fallback_error": f"Fallback analysis also failed: {str(fallback_error)}",
+                    "metrics": [],
+                    "risks": [],
+                    "executive_summary": "",
+                    "business_outlook": "",
+                    "sentiment": {"sentiment": "neutral", "explanation": "Analysis failed"},
+                    "processing_time": f"{processing_time:.2f} seconds",
+                    "processing_date": datetime.now().isoformat(),
+                    "model_used": "none (all methods failed)"
+                }
     
-    def _chunk_text(self, text: str) -> List[str]:
-        """Split text into chunks for processing, respecting token limits."""
-        if not text:
-            return []
+    def _comprehensive_fallback_analysis(self, text: str) -> Dict[str, Any]:
+        """
+        Comprehensive fallback analysis when external services are unavailable.
         
-        # For BERT models, typical token limit is 512 tokens
-        # We'll use a conservative estimate of 400 tokens per chunk
-        # Assuming average of 4 characters per token for English text
-        char_per_token = 4
-        char_limit = 400 * char_per_token  # ~1600 characters per chunk
-        
-        chunks = []
-        start = 0
-        
-        while start < len(text):
-            end = min(start + char_limit, len(text))
+        Args:
+            text: Financial text to analyze
             
-            # If not at the end, try to break at a sentence boundary
-            if end < len(text):
-                # Look for sentence boundary within the last 20% of the chunk
-                boundary_search_start = max(start + int(char_limit * 0.8), start)
-                sentence_boundary = text.rfind('. ', boundary_search_start, end)
-                if sentence_boundary != -1:
-                    end = sentence_boundary + 2  # Include the period and space
-            
-            chunks.append(text[start:end])
-            
-            # Calculate next start position with overlap
-            overlap = min(self.overlap_size, char_limit // 10)  # 10% overlap by default
-            start = end - overlap if end - overlap > start else end
+        Returns:
+            Dictionary with analysis results
+        """
+        logger.info("Using comprehensive fallback analysis as HuggingFace services are unavailable")
         
-        logger.info(f"Split text into {len(chunks)} chunks for FinBERT processing")
-        return chunks 
+        # Start timing
+        start_time = time.time()
+        
+        # Extract metrics with regex patterns
+        metrics = self.extract_financial_metrics(text)
+        
+        # Extract risk factors with regex patterns
+        risks = extract_risk_factors_with_regex(text)
+        
+        # Generate a basic summary using text extraction
+        summary = self._fallback_summary(text, "executive")
+        
+        # Generate a basic business outlook
+        outlook = self._extract_outlook_statements(text)
+        
+        # Analyze sentiment using fallback method
+        sentiment = fallback_sentiment_analysis(text)
+        
+        # Extract basic entities
+        entities = extract_basic_entities(text)
+        
+        # Generate insights
+        insights = self._generate_insights({
+            "metrics": metrics,
+            "sentiment": sentiment,
+            "risks": risks,
+            "entities": entities
+        })
+        
+        # Calculate processing time
+        processing_time = time.time() - start_time
+        
+        return {
+            "status": "success",
+            "metrics": metrics,
+            "risks": risks,
+            "executive_summary": summary,
+            "business_outlook": outlook,
+            "sentiment": sentiment,
+            "entities": entities,
+            "insights": insights,
+            "processing_time": f"{processing_time:.2f} seconds",
+            "model_used": "fallback_methods"
+        }
+    
+    def _generate_insights(self, analysis_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Generate insights based on the analyzed report data.
+        
+        This method processes the results of various analysis components (metrics, sentiment,
+        risks, and entities) to produce high-level insights about the financial report.
+        The generated insights include:
+        - Key points: Important observations extracted from the analysis
+        - Trends: Identified patterns or trends in the financial data
+        - Recommendations: Actionable suggestions based on the analysis
+        
+        If any component of the analysis fails, this method will still attempt to
+        generate insights from the available data, ensuring robustness in the pipeline.
+        
+        Args:
+            analysis_data: Dictionary containing the following keys:
+                - metrics: List of extracted financial metrics
+                - sentiment: Dictionary with sentiment analysis results
+                - risks: List of identified risk factors
+                - entities: Dictionary of extracted entities (organizations, locations, etc.)
+            
+        Returns:
+            Dictionary with the following keys:
+                - key_points: List of important observations
+                - trends: List of identified trends
+                - recommendations: List of actionable recommendations
+        
+        Note:
+            This method is called during the report analysis process and its output
+            is included in the final analysis result returned to the frontend.
+        """
+        logger.info("Generating insights from analysis data")
+        
+        try:
+            metrics = analysis_data.get("metrics", [])
+            sentiment = analysis_data.get("sentiment", {})
+            risks = analysis_data.get("risks", [])
+            entities = analysis_data.get("entities", {})
+            
+            # Initialize insights dictionary
+            insights = {
+                "key_points": [],
+                "trends": [],
+                "recommendations": []
+            }
+            
+            # Extract key points based on metrics
+            if metrics:
+                logger.info(f"Generating key points from {len(metrics)} metrics")
+                
+                # Look for year-over-year changes in key metrics
+                revenue_metrics = [m for m in metrics if m.get("name", "").lower() in ["revenue", "total revenue", "net revenue"]]
+                profit_metrics = [m for m in metrics if m.get("name", "").lower() in ["net income", "profit", "earnings"]]
+                
+                if revenue_metrics:
+                    insights["key_points"].append(f"Revenue reported as {revenue_metrics[0].get('value')} {revenue_metrics[0].get('unit', '')}")
+                
+                if profit_metrics:
+                    insights["key_points"].append(f"Net income reported as {profit_metrics[0].get('value')} {profit_metrics[0].get('unit', '')}")
+            
+            # Generate insights from sentiment analysis
+            if sentiment and "sentiment" in sentiment:
+                logger.info(f"Generating insights from sentiment: {sentiment.get('sentiment')}")
+                sentiment_value = sentiment.get("sentiment", "neutral")
+                explanation = sentiment.get("explanation", "")
+                
+                if sentiment_value == "positive":
+                    insights["key_points"].append("Overall positive tone in the report, suggesting confidence in business performance")
+                elif sentiment_value == "negative":
+                    insights["key_points"].append("Overall negative tone in the report, suggesting challenges in business performance")
+                elif sentiment_value == "mixed" or sentiment_value == "neutral":
+                    insights["key_points"].append("Mixed or neutral tone in the report")
+                
+                if explanation:
+                    insights["key_points"].append(explanation)
+            
+            # Extract insights from risks
+            if risks:
+                logger.info(f"Generating insights from {len(risks)} risk factors")
+                # Limit to top 3 risks to avoid overwhelming the user
+                top_risks = risks[:3]
+                for risk in top_risks:
+                    insights["key_points"].append(f"Risk factor identified: {risk}")
+                
+                insights["recommendations"].append("Monitor identified risk factors closely")
+            
+            # Extract insights from entity analysis
+            if entities:
+                logger.info(f"Generating insights from entity analysis")
+                # Extract key entities like competitors, technologies, or market trends
+                key_organizations = entities.get("organizations", [])[:3]
+                
+                for org in key_organizations:
+                    insights["key_points"].append(f"Key organization mentioned: {org}")
+            
+            # Add general recommendations if none exist
+            if not insights["recommendations"]:
+                insights["recommendations"] = [
+                    "Consider historical performance when evaluating current metrics",
+                    "Compare with industry benchmarks for context",
+                    "Review risk factors in detail for contingency planning"
+                ]
+            
+            # Add generic trends if none identified
+            if not insights["trends"]:
+                insights["trends"] = [
+                    "Financial data should be analyzed in the context of market conditions",
+                    "Consider industry-wide trends when evaluating performance"
+                ]
+            
+            logger.info(f"Generated {len(insights['key_points'])} key points, {len(insights['trends'])} trends, and {len(insights['recommendations'])} recommendations")
+            return insights
+            
+        except Exception as e:
+            logger.error(f"Error generating insights: {str(e)}")
+            # Return basic fallback insights
+            return {
+                "key_points": ["Failed to generate detailed insights due to an error"],
+                "trends": ["Unable to identify trends due to analysis error"],
+                "recommendations": ["Review the full report manually to identify key insights"]
+            } 

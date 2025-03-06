@@ -39,6 +39,7 @@ class Report(Base):
     processing_status = Column(String(20), default="pending")  # pending, processing, completed, failed
     page_count = Column(Integer, nullable=True)
     last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)
+    error_message = Column(Text, nullable=True)  # Store error message when processing fails
     
     # Relationships
     company = relationship("Company", back_populates="reports")

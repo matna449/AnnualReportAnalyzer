@@ -13,6 +13,8 @@ An AI-powered application for analyzing company annual reports. Extract key fina
 - Historical data tracking
 - Interactive dashboard
 
+> **Note:** The Enhanced AI Analysis feature has been removed from the application due to stability issues. This feature previously provided additional entity extraction, sentiment analysis, and risk assessment using Hugging Face models.
+
 ## Tech Stack
 
 ### Backend
