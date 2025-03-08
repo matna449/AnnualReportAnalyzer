@@ -34,6 +34,10 @@ class LogCaptureHandler(logging.Handler):
     def emit(self, record):
         """Emit a log record to the log queue."""
         try:
+            # Skip SQLAlchemy engine logs for streaming
+            if record.name.startswith('sqlalchemy.engine'):
+                return
+                
             log_entry = {
                 'timestamp': time.time(),
                 'level': record.levelname,

@@ -1,21 +1,45 @@
 import os
 import logging
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import time
 import requests
 from datetime import datetime
+import math
 
 logger = logging.getLogger(__name__)
 
-def chunk_text(text: str, chunk_size: int = 1600, overlap_size: int = 200) -> List[str]:
+def estimate_tokens(text: str) -> int:
+    """
+    Estimate the number of tokens in text based on a conservative ratio.
+    
+    Args:
+        text: Text to estimate tokens for
+        
+    Returns:
+        Estimated number of tokens
+    """
+    # For English text, a conservative estimate is 4 chars per token
+    # This varies by model - BERT, GPT, T5 all tokenize differently
+    # We're using a conservative estimate that works across models
+    words = text.split()
+    word_count = len(words)
+    
+    # English averages ~1.3 tokens per word for most tokenizers
+    estimated_tokens = math.ceil(word_count * 1.3)
+    
+    # Return conservative estimate plus 10% buffer
+    return math.ceil(estimated_tokens * 1.1)
+
+def chunk_text(text: str, chunk_size: int = 1600, overlap_size: int = 200, max_tokens: int = 1024) -> List[str]:
     """
     Split text into chunks for processing, respecting token limits.
     
     Args:
         text: Text to split into chunks
-        chunk_size: Maximum size of each chunk in characters
+        chunk_size: Target size of each chunk in characters
         overlap_size: Number of characters to overlap between chunks
+        max_tokens: Maximum number of tokens per chunk (for model context limits)
         
     Returns:
         List of text chunks
@@ -23,11 +47,8 @@ def chunk_text(text: str, chunk_size: int = 1600, overlap_size: int = 200) -> Li
     if not text:
         return []
     
-    # For BERT models, typical token limit is 512 tokens
-    # We'll use a conservative estimate of 400 tokens per chunk
-    # Assuming average of 4 characters per token for English text
-    char_per_token = 4
-    char_limit = chunk_size  # Default ~1600 characters per chunk
+    # Reduce chunk size to a safer default (1600 characters instead of ~4000)
+    char_limit = min(chunk_size, 1600)
     
     chunks = []
     start = 0
@@ -43,13 +64,26 @@ def chunk_text(text: str, chunk_size: int = 1600, overlap_size: int = 200) -> Li
             if sentence_boundary != -1:
                 end = sentence_boundary + 2  # Include the period and space
         
-        chunks.append(text[start:end])
+        # Get the chunk
+        chunk = text[start:end]
+        
+        # Check if this chunk might be too large in terms of tokens
+        estimated_token_count = estimate_tokens(chunk)
+        if estimated_token_count > max_tokens:
+            logger.warning(f"Chunk exceeds token limit ({estimated_token_count} > {max_tokens}). Splitting recursively.")
+            # Recursively split this chunk into smaller pieces
+            subchart_token_limit = max_tokens // 2  # Use half the token limit for sub-chunks
+            subchunk_char_size = len(chunk) // 2   # Use half the characters
+            subchunks = chunk_text(chunk, subchunk_char_size, overlap_size // 2, subchart_token_limit)
+            chunks.extend(subchunks)
+        else:
+            chunks.append(chunk)
         
         # Calculate next start position with overlap
         overlap = min(overlap_size, char_limit // 10)  # 10% overlap by default
         start = end - overlap if end - overlap > start else end
     
-    logger.info(f"Split text into {len(chunks)} chunks for processing")
+    logger.info(f"Split text into {len(chunks)} chunks for processing (max {max_tokens} tokens per chunk)")
     return chunks
 
 def extract_metrics_with_regex(text: str) -> List[Dict[str, Any]]:
@@ -238,110 +272,6 @@ def extract_basic_entities(text: str) -> Dict[str, List[str]]:
         "organizations": organizations,
         "locations": locations
     }
-
-def call_huggingface_api(api_key: str, model_url: str, text: str, max_retries: int = 3) -> Dict[str, Any]:
-    """
-    Call the Hugging Face API with proper error handling.
-    
-    Args:
-        api_key: HuggingFace API key
-        model_url: URL of the model to use
-        text: Text to process
-        max_retries: Maximum number of retries
-        
-    Returns:
-        Dictionary with API response
-        
-    Raises:
-        ValueError: If the API key is invalid
-        ConnectionError: If there's a network issue
-        TimeoutError: If the API call times out
-        Exception: For other errors
-    """
-    logger.info(f"Calling HuggingFace API with text of length {len(text)}")
-    
-    # Set a reasonable timeout for API calls
-    timeout_seconds = 30
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "inputs": text,
-        "options": {
-            "wait_for_model": True
-        }
-    }
-    
-    attempts = 0
-    while attempts < max_retries:
-        attempts += 1
-        try:
-            # Log the attempt
-            logger.info(f"API attempt {attempts}/{max_retries}")
-            
-            # Make the API call with timeout
-            response = requests.post(
-                model_url, 
-                headers=headers, 
-                json=data,
-                timeout=timeout_seconds
-            )
-            
-            # Check for successful response
-            if response.status_code == 200:
-                result = response.json()
-                logger.info(f"API call successful: {len(str(result))} characters in response")
-                return result
-                
-            # Handle specific error cases
-            elif response.status_code == 401:
-                logger.error("Authentication failed: Invalid HuggingFace API key")
-                raise ValueError("Invalid HuggingFace API key (401 Unauthorized)")
-                
-            elif response.status_code == 503:
-                # Model is loading, wait and retry
-                wait_time = 5 * attempts  # Exponential backoff
-                logger.warning(f"Model is loading. Waiting {wait_time}s before retry.")
-                time.sleep(wait_time)
-                continue
-                
-            elif response.status_code == 429:
-                # Rate limit exceeded
-                logger.warning("Rate limit exceeded. Using fallback method.")
-                raise Exception("Rate limit exceeded")
-                
-            else:
-                logger.error(f"API error: {response.status_code} - {response.text}")
-                if attempts < max_retries:
-                    wait_time = 3 * attempts
-                    logger.info(f"Waiting {wait_time}s before retry")
-                    time.sleep(wait_time)
-                else:
-                    raise Exception(f"API error: {response.status_code} - {response.text}")
-        
-        except requests.exceptions.Timeout:
-            logger.warning(f"API timeout after {timeout_seconds}s on attempt {attempts}")
-            if attempts < max_retries:
-                # Increase timeout for next attempt
-                timeout_seconds = timeout_seconds * 1.5
-                logger.info(f"Increasing timeout to {timeout_seconds}s for next attempt")
-            else:
-                raise TimeoutError(f"API timeout after {attempts} attempts")
-                
-        except Exception as e:
-            logger.error(f"API call error: {str(e)}")
-            if attempts < max_retries:
-                wait_time = 3 * attempts
-                logger.info(f"Waiting {wait_time}s before retry")
-                time.sleep(wait_time)
-            else:
-                raise
-    
-    # If we get here, all retries failed
-    raise Exception(f"All {max_retries} API call attempts failed")
 
 def fallback_sentiment_analysis(text: str) -> Dict[str, Any]:
     """

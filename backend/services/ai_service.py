@@ -65,27 +65,34 @@ class AIService:
             logger.warning("Hugging Face API key appears to be invalid (too short).")
             return False
             
-        # Test API key with a simple request to the FinBERT model
+        # Test API key with a simple request to the Hugging Face API
         try:
             headers = {"Authorization": f"Bearer {self.huggingface_api_key}"}
+            
             # Use a simple test request to validate the API key
             response = requests.post(
-                "https://api-inference.huggingface.co/models/ProsusAI/finbert",
+                "https://api-inference.huggingface.co/models/gpt2",  # Using a simpler, more reliable model
                 headers=headers,
-                json={"inputs": "The company reported strong financial results."},
-                timeout=5
+                json={"inputs": "Hello, world"},
+                timeout=10  # Increased timeout
             )
             
             # Log response details for debugging
-            logger.debug(f"FinBERT API validation - Status code: {response.status_code}")
+            logger.debug(f"API validation - Status code: {response.status_code}")
+            logger.debug(f"API validation - Response body: {response.text[:200]}")
             
+            # Check for valid API key (even if model is loading)
             if response.status_code == 200:
                 self.is_api_key_valid = True
-                logger.info("Hugging Face API key validated successfully for FinBERT model.")
+                logger.info("Hugging Face API key validated successfully.")
+            elif response.status_code == 503 and "currently loading" in response.text:
+                # 503 with "loading" message means the API key is valid but model is loading
+                self.is_api_key_valid = True
+                logger.info("Hugging Face API key is valid (model is loading).")
             elif response.status_code == 401:
-                logger.error("Hugging Face API key is invalid for FinBERT model (401 Unauthorized).")
+                logger.error("Hugging Face API key is invalid (401 Unauthorized).")
             else:
-                logger.warning(f"FinBERT API key validation returned status code: {response.status_code}")
+                logger.warning(f"API key validation returned status code: {response.status_code}")
             
             return self.is_api_key_valid
                 
