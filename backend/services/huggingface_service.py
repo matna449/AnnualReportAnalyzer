@@ -47,8 +47,8 @@ class HuggingFaceService:
         self.fallback_summarization_model = "facebook/bart-base"
         
         # Flan-T5-XL is good for detailed tasks, but can timeout - use smaller version for fallback
-        self.t5_model = "google/flan-t5-xl" 
-        self.fallback_t5_model = "google/flan-t5-base"
+        
+        self.t5_model = "google/flan-t5-base"
         
         # Standard NER model
         self.ner_model = "dslim/bert-base-NER"
@@ -153,47 +153,101 @@ class HuggingFaceService:
         while attempts < max_retries:
             attempts += 1
             try:
+                # Prepare task-specific parameters
+                task_kwargs = {}
+                
+                # Copy parameters from kwargs
+                for key, value in kwargs.items():
+                    task_kwargs[key] = value
+                
+                # Adjust max tokens for all models to avoid errors
+                if "max_new_tokens" in task_kwargs and task_kwargs["max_new_tokens"] > 250:
+                    logger.info(f"Limiting max_new_tokens to 250 for {model_name}")
+                    task_kwargs["max_new_tokens"] = 250
+                elif "max_length" in task_kwargs and task_kwargs["max_length"] > 250:
+                    logger.info(f"Limiting max_length to 250 for {model_name}")
+                    task_kwargs["max_length"] = 250
+                
+                # Set default parameters if not provided
+                if task == "summarization":
+                    if "max_new_tokens" not in task_kwargs and "max_length" not in task_kwargs:
+                        task_kwargs["max_new_tokens"] = min(self.max_output_tokens, 250)  # Ensure within limits
+                    if "min_length" not in task_kwargs:
+                        task_kwargs["min_length"] = 30
+                    if "do_sample" not in task_kwargs:
+                        task_kwargs["do_sample"] = False
+                
+                elif task == "text-generation":
+                    if "max_new_tokens" not in task_kwargs and "max_length" not in task_kwargs:
+                        task_kwargs["max_new_tokens"] = min(self.max_output_tokens, 250)  # Ensure within limits
+                    if "temperature" not in task_kwargs:
+                        task_kwargs["temperature"] = 0.7
+                    if "do_sample" not in task_kwargs:
+                        task_kwargs["do_sample"] = True
+                
                 # Call the appropriate InferenceClient method based on task
                 if task == "text-classification":
                     response = self.inference_client.text_classification(
-                        inputs,  # Changed from text=inputs
+                        inputs,
                         model=model_name
                     )
                     return response
                     
                 elif task == "summarization":
-                    # For summarization tasks, pass parameters directly
-                    max_length = kwargs.get("max_length", self.max_output_tokens)
-                    min_length = kwargs.get("min_length", 30)
-                    do_sample = kwargs.get("do_sample", False)
+                    # For summarization, use the post method directly
+                    # This is more compatible with different versions of the library
+                    payload = {
+                        "inputs": inputs
+                    }
                     
-                    response = self.inference_client.summarization(
-                        inputs,  # Changed from text=inputs
-                        model=model_name,
-                        max_length=max_length,  # Direct parameters instead of parameters dict
-                        min_length=min_length,
-                        do_sample=do_sample
+                    # Add parameters if provided
+                    if task_kwargs:
+                        payload["parameters"] = {}
+                        if "max_new_tokens" in task_kwargs:
+                            # Ensure max_new_tokens is within limits
+                            payload["parameters"]["max_new_tokens"] = min(task_kwargs["max_new_tokens"], 250)
+                        if "min_length" in task_kwargs:
+                            payload["parameters"]["min_length"] = task_kwargs["min_length"]
+                        if "do_sample" in task_kwargs:
+                            payload["parameters"]["do_sample"] = task_kwargs["do_sample"]
+                    
+                    response = self.inference_client.post(
+                        json=payload,
+                        model=model_name
                     )
-                    return {"summary_text": response}
+                    
+                    # Parse the response
+                    if isinstance(response, dict) and "summary_text" in response:
+                        return response
+                    elif isinstance(response, str):
+                        return {"summary_text": response}
+                    else:
+                        return {"summary_text": str(response)}
                     
                 elif task == "text-generation":
-                    # For text generation tasks, pass parameters directly
-                    max_new_tokens = kwargs.get("max_length", self.max_output_tokens)
-                    temperature = kwargs.get("temperature", 0.7)
-                    do_sample = kwargs.get("do_sample", True)
+                    # Extract only the parameters that are valid for text generation
+                    text_gen_kwargs = {
+                        "model": model_name
+                    }
+                    
+                    # Add valid parameters for text generation
+                    if "max_new_tokens" in task_kwargs:
+                        # Ensure max_new_tokens is within limits
+                        text_gen_kwargs["max_new_tokens"] = min(task_kwargs["max_new_tokens"], 250)
+                    if "temperature" in task_kwargs:
+                        text_gen_kwargs["temperature"] = task_kwargs["temperature"]
+                    if "do_sample" in task_kwargs:
+                        text_gen_kwargs["do_sample"] = task_kwargs["do_sample"]
                     
                     response = self.inference_client.text_generation(
-                        inputs,  # Changed from text=inputs
-                        model=model_name,
-                        max_new_tokens=max_new_tokens,  # Direct parameters instead of parameters dict
-                        temperature=temperature,
-                        do_sample=do_sample
+                        inputs,
+                        **text_gen_kwargs
                     )
                     return {"generated_text": response}
                     
                 elif task == "token-classification":
                     response = self.inference_client.token_classification(
-                        inputs,  # Changed from text=inputs
+                        inputs,
                         model=model_name
                     )
                     return response
@@ -573,7 +627,7 @@ class HuggingFaceService:
                     model_name=self.t5_model,
                     task="text-generation",
                     inputs=input_text,
-                    max_length=self.max_output_tokens
+                    max_output_tokens=self.max_output_tokens
                 )
                 
                 # Process results
@@ -721,7 +775,7 @@ class HuggingFaceService:
                             model_name=model_name,
                             task="summarization",
                             inputs=prompt,
-                            max_length=self.max_output_tokens
+                            max_new_tokens=self.max_output_tokens
                         )
                         
                         # Extract summary text
@@ -744,7 +798,7 @@ class HuggingFaceService:
                                     model_name=self.fallback_summarization_model,
                                     task="summarization",
                                     inputs=prompt,
-                                    max_length=self.max_output_tokens // 2,  # Shorter summary from fallback
+                                    max_new_tokens=self.max_output_tokens // 2,  # Shorter summary from fallback
                                 )
                                 
                                 summary_text = result.get("summary_text", "")

@@ -11,6 +11,7 @@ from time import sleep
 import time
 from datetime import datetime
 
+
 # Import shared utilities
 from services.nlp_utils import (
     chunk_text,
@@ -49,55 +50,44 @@ class AIService:
         logger.info("AIService initialized")
     
     def _validate_api_key(self):
-        """
-        Validate the Hugging Face API key.
-        
-        Returns:
-            bool: True if the API key is valid, False otherwise
-        """
-        self.is_api_key_valid = False
-        
+        """Validate the Hugging Face API key using the huggingface-hub package."""
         if not self.huggingface_api_key:
-            logger.warning("No Hugging Face API key provided in environment variables.")
+            logger.warning("No Hugging Face API key provided.")
+            self.is_api_key_valid = False
             return False
             
-        if len(self.huggingface_api_key) < 8:  # Basic length check
-            logger.warning("Hugging Face API key appears to be invalid (too short).")
-            return False
-            
-        # Test API key with a simple request to the Hugging Face API
         try:
-            headers = {"Authorization": f"Bearer {self.huggingface_api_key}"}
+            # Import huggingface_hub here to avoid making it a hard dependency
+            from huggingface_hub import HfApi
+            from huggingface_hub.utils import HfHubHTTPError
             
-            # Use a simple test request to validate the API key
-            response = requests.post(
-                "https://api-inference.huggingface.co/models/gpt2",  # Using a simpler, more reliable model
-                headers=headers,
-                json={"inputs": "Hello, world"},
-                timeout=10  # Increased timeout
-            )
+            # Create an API object with the token
+            api = HfApi(token=self.huggingface_api_key)
             
-            # Log response details for debugging
-            logger.debug(f"API validation - Status code: {response.status_code}")
-            logger.debug(f"API validation - Response body: {response.text[:200]}")
+            # A simple API call that requires authentication but is very lightweight
+            # Just fetching the user's info, which is a quick operation
+            user_info = api.whoami()
             
-            # Check for valid API key (even if model is loading)
-            if response.status_code == 200:
-                self.is_api_key_valid = True
-                logger.info("Hugging Face API key validated successfully.")
-            elif response.status_code == 503 and "currently loading" in response.text:
-                # 503 with "loading" message means the API key is valid but model is loading
-                self.is_api_key_valid = True
-                logger.info("Hugging Face API key is valid (model is loading).")
-            elif response.status_code == 401:
-                logger.error("Hugging Face API key is invalid (401 Unauthorized).")
+            # If we get here without an exception, the key is valid
+            self.is_api_key_valid = True
+            logger.info("Hugging Face API key validated successfully.")
+            return True
+            
+        except ImportError:
+            logger.warning("huggingface_hub package not installed. Cannot validate API key.")
+            self.is_api_key_valid = False
+            return False
+        except HfHubHTTPError as e:
+            # This catches specific API errors like invalid tokens
+            if e.response.status_code == 401:
+                logger.error("Invalid Hugging Face API key (unauthorized).")
             else:
-                logger.warning(f"API key validation returned status code: {response.status_code}")
-            
-            return self.is_api_key_valid
-                
+                logger.error(f"Hugging Face API error: {str(e)}")
+            self.is_api_key_valid = False
+            return False
         except Exception as e:
-            logger.error(f"Error validating API key: {str(e)}")
+            logger.error(f"Error validating Hugging Face API key: {str(e)}")
+            self.is_api_key_valid = False
             return False
     
     def extract_financial_metrics(self, text: str) -> List[Dict[str, Any]]:
