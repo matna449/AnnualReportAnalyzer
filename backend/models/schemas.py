@@ -208,15 +208,6 @@ class AnalysisResult(BaseModel):
     insights: Optional[Dict[str, str]] = None
 
 
-# Enhanced Analysis Response
-class EnhancedAnalysisResponse(BaseModel):
-    report_id: int
-    sentiment: Optional[SentimentAnalysis] = None
-    entities: Optional[Dict[str, List[Entity]]] = None
-    risk: Optional[RiskAssessment] = None
-    insights: Optional[Dict[str, str]] = None
-
-
 # Search schemas
 class SearchParams(BaseModel):
     company_name: Optional[str] = None

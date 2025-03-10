@@ -1,5 +1,4 @@
 import os
-import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -7,17 +6,10 @@ from dotenv import load_dotenv
 from api.routes import router
 from models.database import create_tables
 from middleware.log_streaming import setup_log_streaming
+from utils.logging_config import setup_logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
-
-logger = logging.getLogger(__name__)
+# Set up logging
+logger, _, _ = setup_logging("main")
 
 # Load environment variables
 load_dotenv()

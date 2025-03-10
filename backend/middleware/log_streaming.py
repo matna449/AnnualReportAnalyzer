@@ -5,12 +5,14 @@ import logging
 import asyncio
 import json
 import time
+import os
 from typing import Dict, List, AsyncGenerator, Optional
 from fastapi import FastAPI
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp, Scope, Receive, Send
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
+from datetime import datetime
 
 # Create a custom log handler to capture logs
 class LogCaptureHandler(logging.Handler):
@@ -19,9 +21,23 @@ class LogCaptureHandler(logging.Handler):
         self.log_queue = asyncio.Queue(maxsize=capacity)
         self.formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         
+        # Create a file handler for pipeline logs
+        logs_dir = os.path.join(os.getcwd(), "backend", "logs")
+        if not os.path.exists(logs_dir):
+            os.makedirs(logs_dir)
+        
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        self.pipeline_log_file = os.path.join(logs_dir, f"pipeline_{timestamp}.log")
+        self.file_handler = logging.FileHandler(self.pipeline_log_file)
+        self.file_handler.setFormatter(self.formatter)
+        
     def emit(self, record):
         """Emit a log record to the log queue."""
         try:
+            # Skip SQLAlchemy engine logs for streaming
+            if record.name.startswith('sqlalchemy.engine'):
+                return
+                
             log_entry = {
                 'timestamp': time.time(),
                 'level': record.levelname,
@@ -30,8 +46,11 @@ class LogCaptureHandler(logging.Handler):
                 'pipeline': 'PIPELINE:' in record.getMessage() if hasattr(record, 'getMessage') else False
             }
             
-            # Only log pipeline logs to the queue
+            # Write pipeline logs to file
             if log_entry['pipeline']:
+                # Write to file
+                self.file_handler.emit(record)
+                
                 # Create a coroutine to put the log entry in the queue
                 async def put_log_entry():
                     try:
@@ -106,4 +125,5 @@ class LogStreamingMiddleware(BaseHTTPMiddleware):
 def setup_log_streaming(app: FastAPI):
     """Add log streaming to FastAPI app."""
     app.add_middleware(LogStreamingMiddleware)
-    print("Log streaming middleware initialized") 
+    print("Log streaming middleware initialized")
+    print(f"Pipeline logs will be written to: {log_handler.pipeline_log_file}") 

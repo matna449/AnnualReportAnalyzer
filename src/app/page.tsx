@@ -278,59 +278,44 @@ export default function Home() {
 
   // Function to get status chip color
   const getStatusColor = (status: string) => {
-    switch (status.toLowerCase()) {
+    switch (status) {
       case 'completed':
         return 'success';
       case 'processing':
-      case 'processing_enhanced_analysis':
-        return 'warning';
-      case 'pending':
+      case 'uploaded':
+      case 'analyzing':
         return 'info';
-      case 'failed':
       case 'error':
-      case 'error_enhanced_analysis':
-        return 'error';
       default:
-        return 'default';
+        return 'error';
     }
   };
 
   // Function to get human-readable status
   const getReadableStatus = (status: string) => {
-    switch (status.toLowerCase()) {
+    switch (status) {
       case 'completed':
         return 'Completed';
       case 'processing':
         return 'Processing';
-      case 'processing_enhanced_analysis':
-        return 'Enhanced Analysis';
-      case 'pending':
-        return 'Pending';
-      case 'failed':
-        return 'Failed';
+      case 'uploaded':
+        return 'Uploaded';
+      case 'analyzing':
+        return 'Analyzing';
       case 'error':
-        return 'Error';
-      case 'error_enhanced_analysis':
-        return 'Analysis Error';
       default:
-        return status;
+        return 'Error';
     }
   };
 
   // Get progress step display info
   const getProcessingStepInfo = () => {
-    switch (processingStep) {
-      case 'uploading':
+    switch (processingStatus) {
+      case 'uploaded':
         return {
-          label: 'Uploading PDF...',
+          label: 'Uploading PDF',
           progress: 20,
-          description: 'Your PDF is being uploaded to our servers.'
-        };
-      case 'queued':
-        return {
-          label: 'In Queue',
-          progress: 40,
-          description: 'Your report is queued for analysis.'
+          description: 'Your PDF has been uploaded and is being prepared for processing.'
         };
       case 'processing':
       case 'analyzing':

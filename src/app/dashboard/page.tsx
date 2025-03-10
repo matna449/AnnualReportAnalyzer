@@ -24,6 +24,16 @@ import SummaryCard from '@/components/SummaryCard';
 import FinancialPerformanceChart from '@/components/FinancialPerformanceChart';
 import CompanyList from '@/components/CompanyList';
 
+// Define interface for metrics data structure
+interface CompanyMetricsData {
+  metrics: Record<string, Array<{
+    id: number;
+    year: number | string;
+    value: number | string;
+    unit: string;
+  }>>;
+}
+
 // Dashboard page component
 export default function Dashboard() {
   const [loading, setLoading] = useState(true);
@@ -32,8 +42,8 @@ export default function Dashboard() {
   const [recentReports, setRecentReports] = useState<any[]>([]);
   const [companies, setCompanies] = useState<any[]>([]);
   const [selectedCompany, setSelectedCompany] = useState<number | null>(null);
-  const [companyMetrics, setCompanyMetrics] = useState<any[]>([]);
-  const [metricType, setMetricType] = useState<string>('revenue');
+  const [companyMetrics, setCompanyMetrics] = useState<CompanyMetricsData | null>(null);
+  const [selectedMetricType, setSelectedMetricType] = useState('revenue');
   const [tabValue, setTabValue] = useState<string>('executive');
 
   useEffect(() => {
@@ -142,41 +152,45 @@ export default function Dashboard() {
 
   // Get financial metrics data for the selected company
   const getFinancialMetricsData = () => {
-    if (!companyMetrics || !Array.isArray(companyMetrics) || companyMetrics.length === 0) {
+    if (!companyMetrics || !companyMetrics.metrics) {
       return [];
     }
     
-    // Transform the data for the chart
+    // The metrics structure is now different
     const metricsByYear: Record<string, any> = {};
+    const metrics = companyMetrics.metrics;
     
-    companyMetrics.forEach(metric => {
-      if (!metric || typeof metric !== 'object') return;
+    // Process each metric type (Revenue, Net Income, etc.)
+    Object.entries(metrics).forEach(([metricName, values]) => {
+      if (!Array.isArray(values)) return;
       
-      const year = metric.year;
-      if (!year) return;
-      
-      if (!metricsByYear[year]) {
-        metricsByYear[year] = { year };
-      }
-      
-      // Clean up the value (remove currency symbols, convert to number)
-      let value = metric.value;
-      if (typeof value === 'string') {
-        value = value.replace(/[$,]/g, '');
-        value = parseFloat(value);
-        if (isNaN(value)) return; // Skip if not a valid number
-      } else if (typeof value !== 'number') {
-        return; // Skip if not a string or number
-      }
-      
-      // Normalize the metric name to camelCase for the chart
-      if (!metric.name || typeof metric.name !== 'string') return;
-      
-      const metricKey = metric.name
-        .toLowerCase()
-        .replace(/[^a-z0-9]+(.)/g, (_: string, char: string) => char.toUpperCase());
-      
-      metricsByYear[year][metricKey] = value;
+      // Each value has year and value properties
+      values.forEach(item => {
+        if (!item || typeof item !== 'object' || !item.year) return;
+        
+        const year = item.year.toString();
+        
+        if (!metricsByYear[year]) {
+          metricsByYear[year] = { year };
+        }
+        
+        // Clean up the value (remove currency symbols, convert to number)
+        let value = item.value;
+        if (typeof value === 'string') {
+          value = value.replace(/[$,]/g, '');
+          value = parseFloat(value);
+          if (isNaN(value)) return; // Skip if not a valid number
+        } else if (typeof value !== 'number') {
+          return; // Skip if not a string or number
+        }
+        
+        // Normalize the metric name to camelCase for the chart
+        const metricKey = metricName
+          .toLowerCase()
+          .replace(/[^a-z0-9]+(.)/g, (_: string, char: string) => char.toUpperCase());
+        
+        metricsByYear[year][metricKey] = value;
+      });
     });
     
     return Object.values(metricsByYear).sort((a, b) => parseInt(a.year) - parseInt(b.year));
@@ -187,7 +201,7 @@ export default function Dashboard() {
   };
 
   const handleMetricTypeChange = (event: React.SyntheticEvent, newValue: string) => {
-    setMetricType(newValue);
+    setSelectedMetricType(newValue);
   };
 
   if (loading) {
@@ -396,7 +410,7 @@ export default function Dashboard() {
               
               <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}>
                 <Tabs 
-                  value={metricType} 
+                  value={selectedMetricType} 
                   onChange={handleMetricTypeChange}
                 >
                   <Tab label="Revenue" value="revenue" />
@@ -405,11 +419,24 @@ export default function Dashboard() {
                 </Tabs>
               </Box>
               
-              {companyMetrics && Array.isArray(companyMetrics) && companyMetrics.length > 0 ? (
+              <Box sx={{ mb: 3 }}>
+                <Typography variant="subtitle1" gutterBottom>
+                  {companies.find(c => c.id === selectedCompany)?.name || 'Company'} Financial Performance
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {selectedMetricType === 'revenue' && 'Annual revenue figures in USD'}
+                  {selectedMetricType === 'netIncome' && 'Annual net income in USD'}
+                  {selectedMetricType === 'eps' && 'Earnings per share in USD'}
+                  {selectedMetricType === 'ebitda' && 'EBITDA in USD'}
+                  {selectedMetricType === 'profitMargin' && 'Profit margin as percentage'}
+                </Typography>
+              </Box>
+              
+              {companyMetrics && companyMetrics.metrics && Object.keys(companyMetrics.metrics).length > 0 ? (
                 <FinancialPerformanceChart 
                   title="" 
                   data={getFinancialMetricsData()}
-                  dataKeys={[metricType]}
+                  dataKeys={[selectedMetricType]}
                   xAxisKey="year"
                   colors={['#82ca9d']}
                 />
@@ -425,6 +452,30 @@ export default function Dashboard() {
             title="Recent Reports" 
             companies={getCompaniesData()}
           />
+        </Grid>
+
+        {/* Financial Performance Chart */}
+        <Grid item xs={12} md={8}>
+          <Paper sx={{ p: 3, height: '100%' }}>
+            <Typography variant="h6" gutterBottom>
+              Financial Performance
+            </Typography>
+            
+            {selectedCompany ? (
+              <>
+                <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}>
+                  <Tabs 
+                    value={selectedMetricType} 
+                    onChange={handleMetricTypeChange}
+                  >
+                    <Tab label="Revenue" value="revenue" />
+                  </Tabs>
+                </Box>
+              </>
+            ) : (
+              <Alert severity="info">Select a company to view financial performance</Alert>
+            )}
+          </Paper>
         </Grid>
       </Grid>
     </PageLayout>

@@ -1,9 +1,10 @@
 import logging
 import json
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_, func
 from datetime import datetime
+from sqlalchemy.exc import SQLAlchemyError
 
 from models.database import Company, Report, Metric, Summary, Entity, SentimentAnalysis, RiskAssessment
 from models.schemas import (
@@ -14,12 +15,27 @@ from models.schemas import (
 
 logger = logging.getLogger(__name__)
 
+class DBServiceError(Exception):
+    """Base exception for database service errors."""
+    pass
+
 class DBService:
     """Service for database operations."""
     
     @staticmethod
-    def create_company(db: Session, company: CompanyCreate) -> Company:
-        """Create a new company."""
+    def create_company(db: Session, company: CompanyCreate) -> Tuple[Optional[Company], Optional[str]]:
+        """
+        Create a new company in the database.
+        
+        Args:
+            db: Database session
+            company: Company data to create
+            
+        Returns:
+            Tuple containing:
+            - Company object or None if error
+            - Error message or None if successful
+        """
         try:
             db_company = Company(
                 name=company.name,
@@ -30,11 +46,18 @@ class DBService:
             db.add(db_company)
             db.commit()
             db.refresh(db_company)
-            return db_company
+            logger.info(f"Created company: {db_company.name} (ID: {db_company.id})")
+            return db_company, None
+        except SQLAlchemyError as e:
+            db.rollback()
+            error_msg = f"Database error creating company: {str(e)}"
+            logger.error(error_msg)
+            return None, error_msg
         except Exception as e:
             db.rollback()
-            logger.error(f"Error creating company: {str(e)}")
-            raise
+            error_msg = f"Unexpected error creating company: {str(e)}"
+            logger.error(error_msg)
+            return None, error_msg
     
     @staticmethod
     def update_company(db: Session, company_id: int, company: CompanyUpdate) -> Optional[Company]:
@@ -122,14 +145,30 @@ class DBService:
             raise
     
     @staticmethod
-    def update_report_status(db: Session, report_id: int, status: str) -> Optional[Report]:
-        """Update the processing status of a report."""
+    def update_report_status(db: Session, report_id: int, status: str, error_message: Optional[str] = None) -> Optional[Report]:
+        """
+        Update the processing status of a report.
+        
+        Args:
+            db: Database session
+            report_id: ID of the report to update
+            status: New processing status
+            error_message: Optional error message if status is 'failed'
+            
+        Returns:
+            Updated Report object or None if report not found
+        """
         try:
             db_report = db.query(Report).filter(Report.id == report_id).first()
             if not db_report:
                 return None
             
             db_report.processing_status = status
+            
+            # If there's an error message and status is failed, store it
+            if error_message and status == "failed":
+                db_report.error_message = error_message
+            
             db.commit()
             db.refresh(db_report)
             return db_report
@@ -212,13 +251,44 @@ class DBService:
             raise
     
     @staticmethod
-    def get_metrics_by_report(db: Session, report_id: int) -> List[Metric]:
-        """Get all metrics for a report."""
+    def get_metrics_by_report(db: Session, report_id: int) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+        """
+        Get all metrics for a specific report.
+        
+        Args:
+            db: Database session
+            report_id: ID of the report to get metrics for
+            
+        Returns:
+            Tuple containing:
+            - List of metrics as dictionaries or None if error
+            - Error message or None if successful
+        """
         try:
-            return db.query(Metric).filter(Metric.report_id == report_id).all()
+            metrics = db.query(Metric).filter(Metric.report_id == report_id).all()
+            
+            # Format metrics consistently as dictionaries
+            result = []
+            for metric in metrics:
+                result.append({
+                    "id": metric.id,
+                    "report_id": metric.report_id,
+                    "name": metric.name,
+                    "value": metric.value,
+                    "unit": metric.unit,
+                    "year": metric.year
+                })
+            
+            logger.info(f"Retrieved {len(result)} metrics for report ID {report_id}")
+            return result, None
+        except SQLAlchemyError as e:
+            error_msg = f"Database error retrieving metrics for report {report_id}: {str(e)}"
+            logger.error(error_msg)
+            return None, error_msg
         except Exception as e:
-            logger.error(f"Error getting metrics by report: {str(e)}")
-            raise
+            error_msg = f"Unexpected error retrieving metrics for report {report_id}: {str(e)}"
+            logger.error(error_msg)
+            return None, error_msg
     
     @staticmethod
     def create_summary(db: Session, summary: SummaryCreate) -> Summary:
@@ -325,26 +395,77 @@ class DBService:
             return None
     
     @staticmethod
-    def get_report_full_data(db: Session, report_id: int) -> Dict[str, Any]:
-        """Get a report with all its associated data (metrics and summaries)."""
-        try:
-            report = db.query(Report).filter(Report.id == report_id).first()
-            if not report:
-                return {}
+    def get_report_full_data(db: Session, report_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """
+        Get full report data including metrics and summaries.
+        
+        Args:
+            db: Database session
+            report_id: ID of the report to retrieve
             
-            company = db.query(Company).filter(Company.id == report.company_id).first()
+        Returns:
+            Tuple containing:
+            - Dictionary with report data or None if error
+            - Error message or None if successful
+        """
+        try:
+            # Get the report with company data
+            report = db.query(Report).filter(Report.id == report_id).first()
+            
+            if not report:
+                return None, f"Report with ID {report_id} not found"
+                
+            # Get metrics for the report
             metrics = db.query(Metric).filter(Metric.report_id == report_id).all()
+            
+            # Get summaries for the report
             summaries = db.query(Summary).filter(Summary.report_id == report_id).all()
             
-            return {
-                "report": report,
-                "company": company,
-                "metrics": metrics,
-                "summaries": summaries
+            # Get entities for the report
+            entities = db.query(Entity).filter(Entity.report_id == report_id).all()
+            
+            # Get sentiment analysis for the report
+            sentiment = db.query(SentimentAnalysis).filter(SentimentAnalysis.report_id == report_id).first()
+            
+            # Get risk assessment for the report
+            risk = db.query(RiskAssessment).filter(RiskAssessment.report_id == report_id).first()
+            
+            # Format the response
+            result = {
+                "id": report.id,
+                "company_id": report.company_id,
+                "company_name": report.company.name if report.company else None,
+                "ticker": report.company.ticker if report.company else None,
+                "sector": report.company.sector if report.company else None,
+                "year": report.year,
+                "file_path": report.file_path,
+                "upload_date": report.upload_date.isoformat(),
+                "processing_status": report.processing_status,
+                "metrics": [{"name": m.name, "value": m.value, "unit": m.unit} for m in metrics],
+                "summaries": {s.category: s.content for s in summaries},
+                "entities": [{"name": e.name, "type": e.entity_type, "mentions": e.mention_count, "sentiment": e.sentiment_score} for e in entities],
+                "sentiment": {
+                    "overall_score": sentiment.overall_score if sentiment else None,
+                    "positive_sections": sentiment.positive_sections if sentiment else None,
+                    "negative_sections": sentiment.negative_sections if sentiment else None
+                } if sentiment else None,
+                "risk_assessment": {
+                    "overall_risk_score": risk.overall_risk_score if risk else None,
+                    "risk_factors": json.loads(risk.risk_factors) if risk and risk.risk_factors else None
+                } if risk else None
             }
+            
+            logger.info(f"Retrieved full data for report ID {report_id}")
+            return result, None
+            
+        except SQLAlchemyError as e:
+            error_msg = f"Database error retrieving report {report_id}: {str(e)}"
+            logger.error(error_msg)
+            return None, error_msg
         except Exception as e:
-            logger.error(f"Error getting report full data: {str(e)}")
-            raise
+            error_msg = f"Unexpected error retrieving report {report_id}: {str(e)}"
+            logger.error(error_msg)
+            return None, error_msg
     
     @staticmethod
     def get_company_reports_by_year(db: Session, company_id: int) -> Dict[int, Report]:
@@ -413,8 +534,9 @@ class DBService:
             return []
     
     @staticmethod
-    def get_company_metrics(db: Session, company_id: int, metric_names: Optional[List[str]] = None) -> Dict[str, List]:
-        """Get metrics for a specific company across all reports.
+    def get_company_metrics(db: Session, company_id: int, metric_names: Optional[List[str]] = None) -> Tuple[Optional[Dict[str, List[Dict[str, Any]]]], Optional[str]]:
+        """
+        Get metrics for a company, optionally filtered by metric names.
         
         Args:
             db: Database session
@@ -422,42 +544,62 @@ class DBService:
             metric_names: Optional list of metric names to filter by
             
         Returns:
-            Dictionary with metrics organized by year
+            Tuple containing:
+            - Dictionary of metrics by name or None if error
+            - Error message or None if successful
         """
         try:
-            # Get all reports for the company
+            # Get all reports for this company
             reports = db.query(Report).filter(Report.company_id == company_id).all()
             
             if not reports:
-                return {"metrics": []}
+                logger.warning(f"No reports found for company ID {company_id}")
+                return {"metrics": {}}, None
             
-            # Get all metrics for these reports
-            metrics_data = []
-            for report in reports:
-                query = db.query(Metric).filter(Metric.report_id == report.id)
-                
-                # Apply metric name filter if provided
-                if metric_names:
-                    query = query.filter(Metric.name.in_(metric_names))
-                
-                report_metrics = query.all()
-                
-                # Add year to each metric
-                for metric in report_metrics:
-                    metrics_data.append({
-                        "id": metric.id,
-                        "name": metric.name,
-                        "value": metric.value,
-                        "unit": metric.unit,
-                        "category": metric.category,
-                        "year": report.year,
-                        "report_id": report.id
-                    })
+            # Get report IDs
+            report_ids = [report.id for report in reports]
             
-            return {"metrics": metrics_data}
+            # Base query for metrics
+            metrics_query = db.query(Metric).filter(Metric.report_id.in_(report_ids))
+            
+            # Apply metric name filter if provided
+            if metric_names and len(metric_names) > 0:
+                metrics_query = metrics_query.filter(Metric.name.in_(metric_names))
+            
+            # Execute query
+            metrics = metrics_query.all()
+            
+            # Group metrics by name
+            metrics_by_name = {}
+            for metric in metrics:
+                if metric.name not in metrics_by_name:
+                    metrics_by_name[metric.name] = []
+                
+                # Get the report year for this metric
+                report = db.query(Report).filter(Report.id == metric.report_id).first()
+                year = report.year if report else None
+                
+                metrics_by_name[metric.name].append({
+                    "id": metric.id,
+                    "year": year,
+                    "value": metric.value,
+                    "unit": metric.unit
+                })
+            
+            # Sort each metric list by year
+            for name in metrics_by_name:
+                metrics_by_name[name] = sorted(metrics_by_name[name], key=lambda x: x["year"] if x["year"] else 0)
+            
+            logger.info(f"Retrieved metrics for company ID {company_id}")
+            return {"metrics": metrics_by_name}, None
+        except SQLAlchemyError as e:
+            error_msg = f"Database error retrieving metrics for company {company_id}: {str(e)}"
+            logger.error(error_msg)
+            return None, error_msg
         except Exception as e:
-            logger.error(f"Error getting company metrics: {str(e)}")
-            raise
+            error_msg = f"Unexpected error retrieving metrics for company {company_id}: {str(e)}"
+            logger.error(error_msg)
+            return None, error_msg
     
     @staticmethod
     def create_entity(db: Session, entity: EntityCreate) -> Entity:
@@ -534,168 +676,6 @@ class DBService:
     def get_risk_assessment_by_report_id(db: Session, report_id: int) -> Optional[RiskAssessment]:
         """Get risk assessment for a report."""
         return db.query(RiskAssessment).filter(RiskAssessment.report_id == report_id).first()
-    
-    @staticmethod
-    def store_enhanced_analysis(db: Session, report_id: int, analysis_results: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Store enhanced analysis results including entities, sentiment, and risk assessment.
-        
-        Args:
-            db: Database session
-            report_id: ID of the report
-            analysis_results: Dictionary with analysis results
-            
-        Returns:
-            Dictionary with stored analysis IDs
-        """
-        result_ids = {}
-        
-        try:
-            # Store entities
-            if "entities" in analysis_results and "entities" in analysis_results["entities"]:
-                entities = analysis_results["entities"]["entities"]
-                entity_ids = []
-                
-                for entity_type, entity_list in entities.items():
-                    for entity in entity_list:
-                        entity_create = EntityCreate(
-                            report_id=report_id,
-                            entity_type=entity_type,
-                            text=entity["text"],
-                            score=entity.get("score", 0.0),
-                            section=None  # Could be added if section info is available
-                        )
-                        db_entity = DBService.create_entity(db, entity_create)
-                        entity_ids.append(db_entity.id)
-                
-                result_ids["entity_ids"] = entity_ids
-            
-            # Store sentiment analysis
-            if "sentiment" in analysis_results:
-                sentiment = analysis_results["sentiment"]
-                sentiment_create = SentimentAnalysisCreate(
-                    report_id=report_id,
-                    sentiment=sentiment.get("sentiment", "neutral"),
-                    score=sentiment.get("score", 0.5),
-                    distribution=sentiment.get("sentiment_distribution", {}),
-                    insight=analysis_results.get("insights", {}).get("sentiment")
-                )
-                db_sentiment = DBService.create_sentiment_analysis(db, sentiment_create)
-                result_ids["sentiment_id"] = db_sentiment.id
-            
-            # Store risk assessment
-            if "risk" in analysis_results:
-                risk = analysis_results["risk"]
-                risk_create = RiskAssessmentCreate(
-                    report_id=report_id,
-                    overall_score=risk.get("overall_risk_score", 0.0),
-                    categories=risk.get("risk_categories", {}),
-                    primary_factors=risk.get("primary_risk_factors", []),
-                    insight=analysis_results.get("insights", {}).get("risk")
-                )
-                db_risk = DBService.create_risk_assessment(db, risk_create)
-                result_ids["risk_id"] = db_risk.id
-            
-            # Store overall insight as a summary
-            if "insights" in analysis_results and "overall" in analysis_results["insights"]:
-                summary_create = SummaryCreate(
-                    report_id=report_id,
-                    category="ai_insight",
-                    content=analysis_results["insights"]["overall"]
-                )
-                db_summary = DBService.create_summary(db, summary_create)
-                result_ids["summary_id"] = db_summary.id
-            
-            return result_ids
-        
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error storing enhanced analysis: {str(e)}")
-            raise
-    
-    @staticmethod
-    def get_enhanced_analysis_by_report_id(db: Session, report_id: int) -> Dict[str, Any]:
-        """
-        Get enhanced analysis results for a report.
-        
-        Args:
-            db: Database session
-            report_id: ID of the report
-            
-        Returns:
-            Dictionary with enhanced analysis results
-        """
-        try:
-            # Get entities
-            entities = DBService.get_entities_by_report_id(db, report_id)
-            
-            # Organize entities by type
-            entity_dict = {}
-            for entity in entities:
-                if entity.entity_type not in entity_dict:
-                    entity_dict[entity.entity_type] = []
-                
-                entity_dict[entity.entity_type].append({
-                    "id": entity.id,
-                    "text": entity.text,
-                    "score": entity.score,
-                    "section": entity.section
-                })
-            
-            # Get sentiment analysis
-            sentiment = DBService.get_sentiment_analysis_by_report_id(db, report_id)
-            sentiment_dict = None
-            if sentiment:
-                sentiment_dict = {
-                    "id": sentiment.id,
-                    "sentiment": sentiment.sentiment,
-                    "score": sentiment.score,
-                    "distribution": sentiment.distribution,
-                    "insight": sentiment.insight
-                }
-            
-            # Get risk assessment
-            risk = DBService.get_risk_assessment_by_report_id(db, report_id)
-            risk_dict = None
-            if risk:
-                risk_dict = {
-                    "id": risk.id,
-                    "overall_score": risk.overall_score,
-                    "categories": risk.categories,
-                    "primary_factors": risk.primary_factors,
-                    "insight": risk.insight
-                }
-            
-            # Get AI insight summary
-            ai_insight = db.query(Summary).filter(
-                Summary.report_id == report_id,
-                Summary.category == "ai_insight"
-            ).first()
-            
-            insights = {}
-            if sentiment and sentiment.insight:
-                insights["sentiment"] = sentiment.insight
-            if risk and risk.insight:
-                insights["risk"] = risk.insight
-            if ai_insight:
-                insights["overall"] = ai_insight.content
-            
-            return {
-                "entities": entity_dict,
-                "sentiment": sentiment_dict,
-                "risk": risk_dict,
-                "insights": insights
-            }
-        
-        except Exception as e:
-            logger.error(f"Error getting enhanced analysis: {str(e)}")
-            return {
-                "entities": {},
-                "sentiment": None,
-                "risk": None,
-                "insights": {},
-                "error": str(e)
-            }
     
     @staticmethod
     def get_report_by_id(db: Session, report_id: int) -> Optional[Report]:

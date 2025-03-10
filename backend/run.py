@@ -5,20 +5,14 @@ This script starts the FastAPI server.
 """
 
 import os
-import logging
 import uvicorn
 from dotenv import load_dotenv
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
+# Import our custom logging configuration
+from utils.logging_config import setup_logging
 
-logger = logging.getLogger(__name__)
+# Set up logging
+logger, _, _ = setup_logging("run")
 
 # Load environment variables
 load_dotenv()
